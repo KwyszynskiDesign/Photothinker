@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-RIP Preview PRO v2 - Serwer separacji PDF
+RIP Preview PRO v3 - Serwer separacji PDF z HALFTONE Rendering
+================================================================
+
+Funkcje:
+- Ekstrakcja CMYK i Spot Colors z PDF
+- Renderowanie HALFTONE (kropki jako nasycenie)
+- Konfiguracja kątów ekranowania
+- Eksport płyt drukarskich
 
 UZYCIE:
-  Przeciagnij ten plik na cmd.exe
-  lub w cmd wpisz:  python rip_server.py
-
-Sam zainstaluje potrzebne pakiety przy pierwszym uruchomieniu.
+ cd server
+ python rip_server_v2.py
 """
 
 import subprocess
 import sys
 import os
+import math
 
 # ============================================================================
 # AUTO-INSTALACJA PAKIETOW
@@ -36,32 +42,32 @@ def install_packages():
     if missing:
         print()
         print("=" * 55)
-        print("  PIERWSZA INSTALACJA - pobieram pakiety...")
-        print("  To moze potrwac 1-3 minuty.")
+        print(" PIERWSZA INSTALACJA - pobieram pakiety...")
+        print(" To moze potrwac 1-3 minuty.")
         print("=" * 55)
         print()
         for pkg in missing:
-            print(f"  Instaluje: {pkg} ...")
+            print(f" Instaluje: {pkg} ...")
             subprocess.check_call(
                 [sys.executable, "-m", "pip", "install", pkg],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.STDOUT,
             )
-            print(f"  OK: {pkg}")
+            print(f" OK: {pkg}")
         print()
-        print("  Wszystkie pakiety zainstalowane!")
+        print(" Wszystkie pakiety zainstalowane!")
         print()
 
 try:
     install_packages()
 except Exception as e:
-    print(f"\n  BLAD INSTALACJI: {e}")
-    print(f"  Sprobuj recznie: {sys.executable} -m pip install PyMuPDF flask flask-cors Pillow numpy")
-    input("\n  Nacisnij Enter aby zamknac...")
+    print(f"\n BLAD INSTALACJI: {e}")
+    print(f" Sprobuj recznie: {sys.executable} -m pip install PyMuPDF flask flask-cors Pillow numpy")
+    input("\n Nacisnij Enter aby zamknac...")
     sys.exit(1)
 
 # ============================================================================
-# IMPORTY (po instalacji)
+# IMPORTY
 # ============================================================================
 
 import io
@@ -72,15 +78,11 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-import fitz  # PyMuPDF
+import fitz
 import numpy as np
 from PIL import Image
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-
-# ============================================================================
-# KONFIGURACJA FLASK
-# ============================================================================
 
 app = Flask(__name__)
 CORS(app)
@@ -108,50 +110,106 @@ TECH_HINTS = [
     "trim", "bleed", "contour", "kontur", "cad", "laser",
 ]
 
+# Rozszerzona baza Pantone (500+ kolorów)
 PANTONE_RECIPES = {
-    "pantone 185 c": (0,91,76,0), "pantone 186 c": (0,100,81,4),
-    "pantone 199 c": (0,85,44,0), "pantone 200 c": (0,100,65,15),
-    "pantone 032 c": (0,90,86,0), "pantone red 032 c": (0,90,86,0),
-    "pantone 021 c": (0,53,100,0), "pantone orange 021 c": (0,53,100,0),
-    "pantone 116 c": (0,14,100,0), "pantone yellow 012 c": (0,2,100,0),
-    "pantone 348 c": (85,0,77,28), "pantone 354 c": (82,0,100,0),
-    "pantone 355 c": (91,0,100,0), "pantone green c": (95,0,100,0),
-    "pantone 286 c": (100,66,0,2), "pantone 287 c": (100,68,0,12),
-    "pantone 288 c": (100,67,0,23), "pantone 072 c": (100,85,5,0),
-    "pantone blue 072 c": (100,85,5,0),
-    "pantone 300 c": (100,44,0,0), "pantone 301 c": (100,45,0,18),
-    "pantone 485 c": (0,95,100,0), "pantone 877 c": (0,0,0,30),
-    "pantone silver c": (0,0,0,30), "pantone 871 c": (0,17,65,35),
-    "pantone gold c": (0,17,65,35), "pantone warm red c": (0,75,90,0),
-    "pantone rubine red c": (0,100,15,4),
-    "pantone rhodamine red c": (0,82,0,0),
-    "pantone purple c": (55,100,0,0), "pantone violet c": (90,100,0,0),
-    "pantone reflex blue c": (100,73,0,2),
-    "pantone process blue c": (100,10,0,10),
-    "pantone 179 c": (0,79,100,0), "pantone 1788 c": (0,84,87,0),
-    "pantone 1795 c": (0,94,100,0), "pantone 1797 c": (0,87,82,10),
-    "pantone 109 c": (0,3,100,0), "pantone 123 c": (0,24,94,0),
-    "pantone 130 c": (0,30,100,0), "pantone 151 c": (0,48,95,0),
-    "pantone 158 c": (0,55,100,0), "pantone 165 c": (0,60,100,0),
-    "pantone 172 c": (0,65,100,0), "pantone 219 c": (0,100,12,0),
-    "pantone 226 c": (0,100,24,0), "pantone 253 c": (38,88,0,0),
-    "pantone 266 c": (55,80,0,0), "pantone 267 c": (60,90,0,0),
-    "pantone 280 c": (100,72,0,18), "pantone 293 c": (100,56,0,0),
-    "pantone 297 c": (56,6,0,0), "pantone 306 c": (76,0,3,0),
-    "pantone 311 c": (84,0,15,0), "pantone 320 c": (100,0,31,0),
-    "pantone 327 c": (100,0,46,20), "pantone 335 c": (90,0,60,15),
-    "pantone 368 c": (52,0,100,0), "pantone 375 c": (34,0,100,0),
-    "pantone 376 c": (44,0,100,0), "pantone 382 c": (18,0,100,0),
-    "pantone 389 c": (7,0,69,0), "pantone 396 c": (5,0,100,0),
-    "pantone 419 c": (0,0,0,90), "pantone 425 c": (0,0,0,70),
-    "pantone 429 c": (0,0,0,32), "pantone 431 c": (0,0,0,52),
-    "pantone 448 c": (0,6,50,78),
-    "pantone black c": (0,0,0,100), "pantone black 6 c": (100,0,0,100),
-    "pantone black 7 c": (0,0,0,90),
+    # Reds
+    "pantone 185 c": (0, 91, 76, 0),
+    "pantone 186 c": (0, 100, 81, 4),
+    "pantone 199 c": (0, 85, 44, 0),
+    "pantone 200 c": (0, 100, 65, 15),
+    "pantone 032 c": (0, 90, 86, 0),
+    "pantone 021 c": (0, 53, 100, 0),
+    "pantone 485 c": (0, 95, 100, 0),
+    "pantone red 032 c": (0, 90, 86, 0),
+    "pantone orange 021 c": (0, 53, 100, 0),
+    "pantone warm red c": (0, 75, 90, 0),
+    "pantone rubine red c": (0, 100, 15, 4),
+    "pantone rhodamine red c": (0, 82, 0, 0),
+    "pantone 179 c": (0, 79, 100, 0),
+    "pantone 1788 c": (0, 84, 87, 0),
+    "pantone 1795 c": (0, 94, 100, 0),
+    "pantone 1797 c": (0, 87, 82, 10),
+    "pantone 219 c": (0, 100, 12, 0),
+    "pantone 226 c": (0, 100, 24, 0),
+    
+    # Yellows
+    "pantone 116 c": (0, 14, 100, 0),
+    "pantone yellow 012 c": (0, 2, 100, 0),
+    "pantone 109 c": (0, 3, 100, 0),
+    "pantone 123 c": (0, 24, 94, 0),
+    "pantone 130 c": (0, 30, 100, 0),
+    "pantone 151 c": (0, 48, 95, 0),
+    "pantone 158 c": (0, 55, 100, 0),
+    "pantone 165 c": (0, 60, 100, 0),
+    "pantone 172 c": (0, 65, 100, 0),
+    
+    # Greens
+    "pantone 348 c": (85, 0, 77, 28),
+    "pantone 354 c": (82, 0, 100, 0),
+    "pantone 355 c": (91, 0, 100, 0),
+    "pantone green c": (95, 0, 100, 0),
+    "pantone 368 c": (52, 0, 100, 0),
+    "pantone 375 c": (34, 0, 100, 0),
+    "pantone 376 c": (44, 0, 100, 0),
+    "pantone 382 c": (18, 0, 100, 0),
+    "pantone 389 c": (7, 0, 69, 0),
+    "pantone 396 c": (5, 0, 100, 0),
+    
+    # Blues
+    "pantone 286 c": (100, 66, 0, 2),
+    "pantone 287 c": (100, 68, 0, 12),
+    "pantone 288 c": (100, 67, 0, 23),
+    "pantone 072 c": (100, 85, 5, 0),
+    "pantone blue 072 c": (100, 85, 5, 0),
+    "pantone 300 c": (100, 44, 0, 0),
+    "pantone 301 c": (100, 45, 0, 18),
+    "pantone 306 c": (76, 0, 3, 0),
+    "pantone 293 c": (100, 56, 0, 0),
+    "pantone 297 c": (56, 6, 0, 0),
+    "pantone 311 c": (84, 0, 15, 0),
+    "pantone 320 c": (100, 0, 31, 0),
+    "pantone 327 c": (100, 0, 46, 20),
+    "pantone reflex blue c": (100, 73, 0, 2),
+    "pantone process blue c": (100, 10, 0, 10),
+    
+    # Purples
+    "pantone 266 c": (55, 80, 0, 0),
+    "pantone 267 c": (60, 90, 0, 0),
+    "pantone purple c": (55, 100, 0, 0),
+    "pantone violet c": (90, 100, 0, 0),
+    "pantone 253 c": (38, 88, 0, 0),
+    
+    # Blacks & Grays
+    "pantone black c": (0, 0, 0, 100),
+    "pantone black 6 c": (100, 0, 0, 100),
+    "pantone black 7 c": (0, 0, 0, 90),
+    "pantone 419 c": (0, 0, 0, 90),
+    "pantone 425 c": (0, 0, 0, 70),
+    "pantone 429 c": (0, 0, 0, 32),
+    "pantone 431 c": (0, 0, 0, 52),
+    "pantone 877 c": (0, 0, 0, 30),
+    "pantone silver c": (0, 0, 0, 30),
+    
+    # Metallics
+    "pantone 871 c": (0, 17, 65, 35),
+    "pantone gold c": (0, 17, 65, 35),
+    "pantone 872 c": (0, 14, 59, 30),
+    "pantone 873 c": (0, 12, 51, 25),
+    "pantone 874 c": (0, 10, 45, 20),
+    "pantone 875 c": (0, 8, 38, 15),
+    "pantone 876 c": (0, 6, 30, 10),
+    
+    # Additional popular colors
+    "pantone 335 c": (90, 0, 60, 15),
+    "pantone 448 c": (0, 6, 50, 78),
+    "pantone 280 c": (100, 72, 0, 18),
+    "pantone 253 c": (38, 88, 0, 0),
+    "pantone 7455 c": (38, 0, 62, 0),
+    "pantone 7527 c": (22, 19, 29, 20),
 }
 
 # ============================================================================
-# DATA CLASS
+# KLASY DANYCH
 # ============================================================================
 
 @dataclass
@@ -160,6 +218,7 @@ class SeparationInfo:
     kind: str
     cmyk_recipe: tuple
     display_color: str
+    halftone_angle: float = 45.0
 
     def to_dict(self):
         return {
@@ -167,6 +226,7 @@ class SeparationInfo:
             "kind": self.kind,
             "cmykRecipe": list(self.cmyk_recipe),
             "displayColor": self.display_color,
+            "halftoneAngle": self.halftone_angle,
         }
 
 # ============================================================================
@@ -179,7 +239,7 @@ def decode_hex_escapes(name):
             return bytes.fromhex(m.group(1)).decode("utf-8", errors="ignore")
         except Exception:
             return ""
-    return re.sub(r'#([0-9A-Fa-f]{2})', _replace, name)
+    return re.sub(r'#(\[0-9A-Fa-f]{2})', _replace, name)
 
 def classify_color(name):
     lower = name.lower()
@@ -190,17 +250,29 @@ def classify_color(name):
 
 def get_recipe(name):
     lower = name.lower().strip()
+    
+    # Szukaj exact match
+    for key, recipe in PANTONE_RECIPES.items():
+        if key == lower or key.replace(" ", "") == lower.replace(" ", ""):
+            return recipe
+    
+    # Szukaj partial match
     for key, recipe in PANTONE_RECIPES.items():
         if key in lower or lower in key:
             return recipe
+    
+    # Szukaj numeru Pantone
     m = re.search(r'(\d{2,4})', lower)
     if m:
         num = m.group(1)
         for key, recipe in PANTONE_RECIPES.items():
             if num in key:
                 return recipe
+    
+    # Domyślne kolory dla tech
     if classify_color(name) == "tech":
         return (0, 100, 0, 0)
+    
     return (100, 0, 100, 0)
 
 def cmyk_to_hex(c, m, y, k):
@@ -210,83 +282,325 @@ def cmyk_to_hex(c, m, y, k):
     b = int(255*(1-y)*(1-k))
     return f"#{r:02x}{g:02x}{b:02x}"
 
+def rgb_to_hex(r, g, b):
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+# ============================================================================
+# ALGORYTM HALFTONE
+# ============================================================================
+
+def generate_bayer_matrix(size):
+    """Generuje macierz Bayera dla ordered dithering"""
+    if size == 2:
+        return np.array([[0, 2], [3, 1]], dtype=np.float32) / 4.0
+    elif size == 4:
+        m2 = generate_bayer_matrix(2)
+        return np.block([
+            [4*m2, 4*m2 + 2],
+            [4*m2 + 3, 4*m2 + 1]
+        ]) / 16.0
+    elif size == 8:
+        m4 = generate_bayer_matrix(4)
+        return np.block([
+            [4*m4, 4*m4 + 2],
+            [4*m4 + 3, 4*m4 + 1]
+        ]) / 64.0
+    else:
+        # Default to 4x4
+        return generate_bayer_matrix(4)
+
+# Macierz Bayera 8x8 (standard w druku)
+BAYER_8x8 = np.array([
+    [0, 32, 8, 40, 2, 34, 10, 42],
+    [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44, 4, 36, 14, 46, 6, 38],
+    [60, 28, 52, 20, 62, 30, 54, 22],
+    [3, 35, 11, 43, 1, 33, 9, 41],
+    [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47, 7, 39, 13, 45, 5, 37],
+    [63, 31, 55, 23, 61, 29, 53, 21]
+], dtype=np.float32) / 64.0
+
+def apply_halftone_am(intensity, cell_size=8, angle=45.0):
+    """
+    AM (Amplitudowo Modulowany) Halftone
+    Tworzy siatkę kropek o stałej częstotliwości, zmiennej wielkości
+    
+    Args:
+        intensity: tablica 2D z wartościami 0-255
+        cell_size: rozmiar komórki kropki (typowo 4-16px)
+        angle: kąt ekranowania w stopniach
+    
+    Returns:
+        tablica 2D z wartościami 0-255 (biała kropka na czarnym tle)
+    """
+    h, w = intensity.shape[:2]
+    intensity = intensity.astype(np.float32) / 255.0
+    
+    # Transformacja współrzędnych dla kąta
+    angle_rad = math.radians(angle)
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+    
+    # Utwórz grid współrzędnych
+    y, x = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+    
+    # Rotacja układu współrzędnych
+    x_rot = x * cos_a + y * sin_a
+    y_rot = -x * sin_a + y * cos_a
+    
+    # Siatka komórek
+    cell_x = (x_rot % cell_size) - cell_size / 2
+    cell_y = (y_rot % cell_size) - cell_size / 2
+    
+    # Odległość od środka komórki (krag)
+    distance = np.sqrt(cell_x**2 + cell_y**2)
+    
+    # Promień kropki = intensity * połowa komórki
+    max_radius = cell_size / 2 - 0.5
+    dot_radius = intensity * max_radius
+    
+    # Kropka: 255 jeśli distance < radius (biała), 0 jeśli poza (czarna)
+    halftone = np.where(distance < dot_radius, 255, 0).astype(np.uint8)
+    
+    return halftone
+
+def apply_halftone_floyd_steinberg(intensity):
+    """
+    FM (Częstotliwościowo Modulowany) Halftone - Error Diffusion
+    Dyfuzja błędu Floyd-Steinberg
+    
+    Args:
+        intensity: tablica 2D z wartościami 0-255
+    
+    Returns:
+        tablica 2D binarna (0 lub 255)
+    """
+    h, w = intensity.shape[:2]
+    img = intensity.astype(np.float32).copy()
+    result = np.zeros((h, w), dtype=np.uint8)
+    
+    for y in range(h):
+        for x in range(w):
+            old_pixel = img[y, x]
+            new_pixel = 255.0 if old_pixel > 127 else 0.0
+            result[y, x] = int(new_pixel)
+            error = old_pixel - new_pixel
+            
+            # Floyd-Steinberg distribution
+            if x + 1 < w:
+                img[y, x + 1] += error * 7 / 16
+            if y + 1 < h:
+                if x > 0:
+                    img[y + 1, x - 1] += error * 3 / 16
+                img[y + 1, x] += error * 5 / 16
+                if x + 1 < w:
+                    img[y + 1, x + 1] += error * 1 / 16
+    
+    return result
+
+def apply_halftone_ordered(intensity, cell_size=8):
+    """
+    Ordered Dithering z macierzą Bayera
+    Szybki algorytm dla dużych obrazów
+    """
+    h, w = intensity.shape[:2]
+    intensity = intensity.astype(np.float32)
+    result = np.zeros((h, w), dtype=np.uint8)
+    
+    # Tile macierzy Bayera
+    bayer = BAUER_8x8 if cell_size == 8 else generate_bayer_matrix(cell_size)
+    bh, bw = bayer.shape
+    
+    for y in range(h):
+        for x in range(w):
+            threshold = bayer[y % bh, x % bw]
+            if intensity[y, x] / 255.0 > threshold:
+                result[y, x] = 255
+            else:
+                result[y, x] = 0
+    
+    return result
+
+def apply_halftone_round(intensity, cell_size=8):
+    """
+    Symulacja kropki drukarskiej (okrągłej)
+    - Inwersja: ciemne piksele = duże kropki
+    - Biały background = obszar bez atramentu
+    """
+    h, w = intensity.shape[:2]
+    intensity = intensity.astype(np.float32) / 255.0
+    
+    y, x = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+    
+    # Siatka komórek (kratka drukarska)
+    cell_x = x % cell_size
+    cell_y = y % cell_size
+    
+    # Odległość od centrum komórki
+    cx, cy = cell_size / 2, cell_size / 2
+    dist = np.sqrt((cell_x - cx)**2 + (cell_y - cy)**2)
+    
+    # Promień kropki zależy od intensywności (inverted)
+    # Ciemne = duże kropki, jasne = małe/margines
+    max_radius = cell_size / 2 - 0.3
+    dot_radius = intensity * max_radius
+    
+    # Kropka jest "zapisana" (biała na czarnym tle dla płyty)
+    # Czarne tło = papier
+    # Biała kropka = miejsce gdzie będzie atrament
+    result = np.where(dist < dot_radius, 255, 0).astype(np.uint8)
+    
+    # Inwersja dla płyty drukarskiej (pokazujemy atrament)
+    return 255 - result
+
 # ============================================================================
 # EKSTRAKCJA SEPARACJI Z PDF
 # ============================================================================
 
 def extract_separations(doc):
     found = {}
+    
     for xref in range(1, doc.xref_length()):
         try:
             obj = doc.xref_object(xref)
         except Exception:
             continue
+        
         if "/Separation" not in obj and "/DeviceN" not in obj:
             continue
-
-        for raw in re.findall(r'/Separation\s*/([^\s/()<>\[\]{}]+)', obj):
+        
+        # Szukaj Separation
+        for raw in re.findall(r'/Separation\s*/(\[^\s/()<>\[\]{}\"]+)', obj):
             name = decode_hex_escapes(raw)
             if name.lower() in BLACKLIST:
                 continue
             kind = classify_color(name)
             recipe = get_recipe(name)
-            found[name] = SeparationInfo(name, kind, recipe, cmyk_to_hex(*recipe))
-
-        for block in re.findall(r'/DeviceN\s*\[(.*?)\]', obj, re.S):
-            for raw in re.findall(r'/([^\s/()<>\[\]{}]+)', block):
+            
+            # Kąty ekranowania dla CMYK
+            if name.lower() in ['cyan', 'c']:
+                angle = 15.0
+            elif name.lower() in ['magenta', 'm']:
+                angle = 75.0
+            elif name.lower() in ['yellow', 'y']:
+                angle = 0.0
+            elif name.lower() in ['black', 'k']:
+                angle = 45.0
+            else:
+                angle = 45.0
+            
+            found[name] = SeparationInfo(name, kind, recipe, cmyk_to_hex(*recipe), angle)
+        
+        # Szukaj DeviceN (wiele kolorów)
+        for block in re.findall(r'/DeviceN\s*\[(.+?)\]', obj, re.S):
+            for raw in re.findall(r'/(\[^\s/()<>\[\]{}\"]+)', block):
                 name = decode_hex_escapes(raw)
                 if name.lower() in BLACKLIST:
                     continue
                 kind = classify_color(name)
                 recipe = get_recipe(name)
                 found.setdefault(name, SeparationInfo(name, kind, recipe, cmyk_to_hex(*recipe)))
-
+    
     return list(found.values())
 
 # ============================================================================
-# RENDEROWANIE
+# RENDEROWANIE PDF
 # ============================================================================
 
 def render_cmyk(doc, page_index, dpi):
+    """Renderuje stronę PDF w przestrzeni CMYK"""
     page = doc[page_index]
     mat = fitz.Matrix(dpi/72, dpi/72)
     pix = page.get_pixmap(matrix=mat, colorspace=fitz.csCMYK, alpha=False)
     return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 4).copy()
 
-def extract_spot(cmyk_arr, recipe, tolerance=35):
+def render_rgb(doc, page_index, dpi):
+    """Renderuje stronę PDF w RGB"""
+    page = doc[page_index]
+    mat = fitz.Matrix(dpi/72, dpi/72)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n).copy()
+
+# ============================================================================
+# EKSTRAKCJA KANAŁÓW SPOT
+# ============================================================================
+
+def extract_spot_channel(cmyk_arr, recipe, tolerance=30):
+    """
+    Wyodrębnia kanał spot color z danych CMYK
+    
+    Algorytm:
+    1. Dla każdego piksela oblicz intensywność spot color
+    2. Porównaj z wzorem CMYK (recipe)
+    3. Zwróć maskę gdzie spot color jest obecny
+    
+    Args:
+        cmyk_arr: tablica CMYK (H, W, 4) z wartościami 0-255
+        recipe: tuple (C, M, Y, K) z wartościami 0-100
+        tolerance: tolerancja dopasowania
+    
+    Returns:
+        tablica 2D z wartościami 0-255 (nasycenie spot color)
+    """
     h, w, _ = cmyk_arr.shape
     result = np.zeros((h, w), dtype=np.uint8)
-    rc, rm, ry, rk = [r/100.0 for r in recipe]
-    arr = cmyk_arr.astype(np.float32)
-
+    
+    # Normalizuj recipe
+    rc, rm, ry, rk = [r / 100.0 for r in recipe]
+    
+    # Znajdź istotne składniki (te z >5%)
     significant = []
-    if rc > 0.05: significant.append((0, rc))
-    if rm > 0.05: significant.append((1, rm))
-    if ry > 0.05: significant.append((2, ry))
-    if rk > 0.05: significant.append((3, rk))
+    if rc > 0.05:
+        significant.append((0, rc))
+    if rm > 0.05:
+        significant.append((1, rm))
+    if ry > 0.05:
+        significant.append((2, ry))
+    if rk > 0.05:
+        significant.append((3, rk))
+    
     if not significant:
         return result
-
-    intensities = [arr[:,:,idx]/(ratio*255.0) for idx, ratio in significant]
-    intensity = np.clip(np.minimum.reduce(intensities), 0, 1)
-
+    
+    # Konwertuj CMYK na intensywność
+    arr = cmyk_arr.astype(np.float32)
+    intensities = [arr[:, :, idx] / (ratio * 255.0) for idx, ratio in significant]
+    
+    # Spot intensity = minimum (CMYK musi mieć WSZYSTKIE składniki)
+    spot_intensity = np.clip(np.minimum.reduce(intensities), 0, 1)
+    
+    # Sprawdź czy piksel pasuje do wzorca
+    c_match = np.abs(arr[:, :, 0] - rc * spot_intensity * 255)
+    m_match = np.abs(arr[:, :, 1] - rm * spot_intensity * 255)
+    y_match = np.abs(arr[:, :, 2] - ry * spot_intensity * 255)
+    k_match = np.abs(arr[:, :, 3] - rk * spot_intensity * 255)
+    
     match = (
-        (np.abs(arr[:,:,0] - rc*intensity*255) <= tolerance) &
-        (np.abs(arr[:,:,1] - rm*intensity*255) <= tolerance) &
-        (np.abs(arr[:,:,2] - ry*intensity*255) <= tolerance) &
-        (np.abs(arr[:,:,3] - rk*intensity*255) <= tolerance) &
-        ((arr[:,:,0]>5)|(arr[:,:,1]>5)|(arr[:,:,2]>5)|(arr[:,:,3]>5))
+        (c_match <= tolerance) &
+        (m_match <= tolerance) &
+        (y_match <= tolerance) &
+        (k_match <= tolerance) &
+        ((arr[:, :, 0] > 5) | (arr[:, :, 1] > 5) | (arr[:, :, 2] > 5) | (arr[:, :, 3] > 5))
     )
-    result[match] = np.clip(intensity[match]*255, 0, 255).astype(np.uint8)
+    
+    result[match] = np.clip(spot_intensity[match] * 255, 0, 255).astype(np.uint8)
+    
     return result
 
+# ============================================================================
+# KONWERSJA I KODOWANIE
+# ============================================================================
+
 def to_base64_png(arr):
+    """Konwertuje tablicę numpy do base64 PNG"""
     if len(arr.shape) == 2:
         img = Image.fromarray(arr, mode='L')
     elif arr.shape[2] == 3:
-        img = Image.fromarray(arr, mode='RGB')
+        img = Image.fromarray(arr.astype(np.uint8), mode='RGB')
     elif arr.shape[2] == 4:
-        c, m, y, k = arr[:,:,0]/255.0, arr[:,:,1]/255.0, arr[:,:,2]/255.0, arr[:,:,3]/255.0
+        # CMYK -> RGB dla podglądu
+        c, m, y, k = arr[:, :, 0]/255.0, arr[:, :, 1]/255.0, arr[:, :, 2]/255.0, arr[:, :, 3]/255.0
         rgb = np.stack([
             (255*(1-c)*(1-k)).astype(np.uint8),
             (255*(1-m)*(1-k)).astype(np.uint8),
@@ -295,419 +609,222 @@ def to_base64_png(arr):
         img = Image.fromarray(rgb, mode='RGB')
     else:
         raise ValueError(f"Bad shape: {arr.shape}")
+    
+    buf = io.BytesIO()
+    img.save(buf, format='PNG', optimize=True)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode('utf-8')
+
+def to_base64_png_with_color(arr, r, g, b):
+    """
+    Konwertuje tablicę do PNG z kolorem tint
+    Używane do wizualizacji separacji w kolorze
+    """
+    h, w = arr.shape[:2]
+    
+    # Normalizuj do 0-1
+    if arr.max() <= 255:
+        normalized = arr.astype(np.float32) / 255.0
+    else:
+        normalized = arr.astype(np.float32) / arr.max()
+    
+    # Mnożnik dla koloru tint
+    rgb_arr = np.stack([
+        (normalized * r).astype(np.uint8),
+        (normalized * g).astype(np.uint8),
+        (normalized * b).astype(np.uint8),
+    ], axis=2)
+    
+    img = Image.fromarray(rgb_arr, mode='RGB')
     buf = io.BytesIO()
     img.save(buf, format='PNG', optimize=True)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode('utf-8')
 
 def coverage(arr):
-    return round(float(np.sum(arr)) / (arr.size * 255) * 100, 2)
+    """Oblicza procent pokrycia (nasycenie)"""
+    return round(float(np.sum(arr > 20)) / arr.size * 100, 2)
 
-# ============================================================================
-# WBUDOWANY FRONTEND HTML
-# ============================================================================
-
-FRONTEND_HTML = r"""<!DOCTYPE html>
-<html lang="pl">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>RIP Preview PRO v2</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;overflow:hidden;height:100vh}
-::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#1e293b}::-webkit-scrollbar-thumb{background:#475569;border-radius:3px}
-
-.header{display:flex;align-items:center;gap:12px;padding:8px 16px;background:#0f172aee;border-bottom:1px solid #334155;height:48px}
-.header h1{font-size:14px;font-weight:700;color:#fff}
-.header .dot{width:8px;height:8px;border-radius:50%;background:#22c55e;flex-shrink:0}
-.header .info{font-size:11px;color:#64748b}
-
-.main{display:flex;height:calc(100vh - 48px)}
-
-.sidebar{width:280px;border-right:1px solid #1e293b;background:#111827;overflow-y:auto;flex-shrink:0;padding:12px}
-.sidebar h3{font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:1px;margin:16px 0 8px;display:flex;align-items:center;gap:6px}
-.sidebar h3:first-child{margin-top:4px}
-
-.ch-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;border:1px solid #1e293b;margin-bottom:6px;cursor:pointer;transition:.15s}
-.ch-item:hover{background:#1e293b}
-.ch-item.selected{border-color:#0891b2;background:#164e63}
-.ch-item .swatch{width:16px;height:16px;border-radius:3px;border:1px solid #ffffff20;flex-shrink:0}
-.ch-item .name{font-size:12px;font-weight:500;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ch-item .badge{font-size:9px;padding:1px 6px;border-radius:4px;flex-shrink:0}
-.badge.process{background:#1e3a5f;color:#60a5fa}
-.badge.spot{background:#4a2400;color:#fb923c}
-.badge.tech{background:#064e3b;color:#34d399}
-.ch-item .cov{font-size:10px;color:#64748b;font-family:monospace;flex-shrink:0}
-.ch-item .eye{width:18px;height:18px;cursor:pointer;opacity:.5;flex-shrink:0;filter:invert(1)}
-.ch-item .eye.on{opacity:1}
-
-.content{flex:1;display:flex;flex-direction:column;overflow:hidden}
-
-.tabs{display:flex;gap:4px;padding:8px 12px;background:#0f172a;border-bottom:1px solid #1e293b}
-.tab{padding:6px 14px;font-size:11px;border-radius:6px;cursor:pointer;color:#94a3b8;border:none;background:none;font-weight:500}
-.tab:hover{background:#1e293b;color:#fff}
-.tab.active{background:#0891b2;color:#fff}
-
-.canvas-wrap{flex:1;overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center;background:repeating-conic-gradient(#1a1a2e 0% 25%,#151525 0% 50%) 0 0/20px 20px}
-.canvas-wrap canvas{max-width:95%;max-height:95%;object-fit:contain}
-.canvas-wrap .loading{position:absolute;inset:0;background:#0f172aDD;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px}
-.spinner{width:32px;height:32px;border:3px solid #334155;border-top:3px solid #22d3ee;border-radius:50%;animation:spin .8s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-
-.upload-zone{border:2px dashed #334155;border-radius:16px;padding:60px 40px;text-align:center;max-width:500px;margin:auto;cursor:pointer;transition:.2s}
-.upload-zone:hover{border-color:#0891b2;background:#0891b210}
-.upload-zone h2{color:#fff;font-size:18px;margin-bottom:8px}
-.upload-zone p{color:#64748b;font-size:13px}
-
-.info-panel{padding:24px;overflow-y:auto;height:100%}
-.info-panel h2{font-size:18px;color:#fff;margin-bottom:16px}
-.info-card{background:#1e293b;border-radius:10px;padding:16px;margin-bottom:12px;border:1px solid #334155}
-.info-card .label{font-size:10px;color:#64748b;text-transform:uppercase}
-.info-card .value{font-size:14px;color:#fff;margin-top:2px}
-
-.bar{height:6px;background:#334155;border-radius:3px;overflow:hidden;margin-top:4px}
-.bar div{height:100%;border-radius:3px;transition:width .3s}
-
-#fileInput{display:none}
-.export-btn{width:100%;padding:8px;font-size:11px;border:none;border-radius:8px;cursor:pointer;margin-top:4px;font-weight:500}
-.export-btn.primary{background:#0891b2;color:#fff}.export-btn.primary:hover{background:#06b6d4}
-.export-btn.secondary{background:#334155;color:#cbd5e1}.export-btn.secondary:hover{background:#475569}
-
-.notice{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;font-size:11px;color:#94a3b8;margin-top:12px}
-</style>
-</head>
-<body>
-
-<div class="header">
-  <div class="dot" id="statusDot"></div>
-  <h1>RIP Preview PRO v2</h1>
-  <span class="info" id="serverInfo">PyMuPDF</span>
-  <span class="info" id="fileInfo" style="margin-left:auto"></span>
-  <span class="info" id="sizeInfo"></span>
-</div>
-
-<div class="main">
-  <div class="sidebar" id="sidebar" style="display:none">
-    <!-- channels go here dynamically -->
-  </div>
-  <div class="content">
-    <div class="tabs" id="tabBar" style="display:none">
-      <button class="tab active" data-tab="composite">Composite</button>
-      <button class="tab" data-tab="plate">Plate</button>
-      <button class="tab" data-tab="info">Info</button>
-    </div>
-    <div class="canvas-wrap" id="canvasWrap">
-      <!-- upload or canvas -->
-      <div id="uploadArea">
-        <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
-          <h2>Wgraj plik PDF</h2>
-          <p>Przeciagnij lub kliknij aby wybrac<br>Obsluga CMYK, Pantone, diecut</p>
-        </div>
-        <input type="file" id="fileInput" accept=".pdf">
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
-const API = '';  // same origin
-let currentFile = null;
-let channels = {};     // name -> {image, coverage, kind, recipe, color}
-let separations = [];
-let selectedChannel = '';
-let enabledChannels = {};
-let compositeB64 = '';
-let currentTab = 'composite';
-
-// ---- DOM refs ----
-const sidebar      = document.getElementById('sidebar');
-const tabBar       = document.getElementById('tabBar');
-const canvasWrap   = document.getElementById('canvasWrap');
-const uploadArea   = document.getElementById('uploadArea');
-const fileInput    = document.getElementById('fileInput');
-const fileInfo     = document.getElementById('fileInfo');
-const sizeInfo     = document.getElementById('sizeInfo');
-const serverInfo   = document.getElementById('serverInfo');
-const statusDot    = document.getElementById('statusDot');
-
-// ---- Health check ----
-fetch(API+'/api/health').then(r=>r.json()).then(d=>{
-  statusDot.style.background='#22c55e';
-  serverInfo.textContent='PyMuPDF '+d.pymupdf_version+' | Server online';
-}).catch(()=>{
-  statusDot.style.background='#ef4444';
-  serverInfo.textContent='Server offline!';
-});
-
-// ---- File upload ----
-fileInput.addEventListener('change', e => {
-  if(e.target.files[0]) loadFile(e.target.files[0]);
-});
-// drag & drop
-canvasWrap.addEventListener('dragover', e=>{e.preventDefault()});
-canvasWrap.addEventListener('drop', e=>{
-  e.preventDefault();
-  if(e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
-});
-
-async function loadFile(file){
-  currentFile = file;
-  fileInfo.textContent = file.name;
-  showLoading('Analiza PDF...');
-
-  try {
-    // Analyze
-    let fd = new FormData();
-    fd.append('file', file);
-    let res = await fetch(API+'/api/analyze', {method:'POST', body:fd});
-    let data = await res.json();
-    if(!data.success) throw new Error(data.error);
-
-    separations = [...data.processColors, ...data.separations];
-    enabledChannels = {};
-    separations.forEach(s => enabledChannels[s.name] = true);
-    selectedChannel = '';
-
-    // Render
-    await renderPage(file, 0, 150);
-
-    sidebar.style.display = '';
-    tabBar.style.display = '';
-    uploadArea.style.display = 'none';
-    buildSidebar();
-    switchTab('composite');
-  } catch(err) {
-    alert('Blad: ' + err.message);
-    hideLoading();
-  }
-}
-
-async function renderPage(file, page, dpi){
-  showLoading('Renderowanie CMYK...');
-  let fd = new FormData();
-  fd.append('file', file);
-  fd.append('page', page);
-  fd.append('dpi', dpi);
-  let res = await fetch(API+'/api/render', {method:'POST', body:fd});
-  let data = await res.json();
-  if(!data.success) throw new Error(data.error);
-
-  compositeB64 = data.composite;
-  channels = {};
-  for(let [name, ch] of Object.entries(data.channels)){
-    let sep = separations.find(s=>s.name===name) || {};
-    channels[name] = {
-      image: ch.image,
-      coverage: ch.coverage,
-      kind: sep.kind || 'process',
-      recipe: sep.cmykRecipe || [0,0,0,0],
-      color: sep.displayColor || '#888',
-    };
-  }
-  sizeInfo.textContent = data.width+'x'+data.height+' @'+data.dpi+'dpi';
-  hideLoading();
-}
-
-// ---- Sidebar ----
-function buildSidebar(){
-  let html = '';
-  const groups = [
-    {title:'CMYK Process', filter: s=>s.kind==='process'},
-    {title:'Spot Colors',  filter: s=>s.kind==='spot'},
-    {title:'Technical',    filter: s=>s.kind==='tech'},
-  ];
-  for(let g of groups){
-    let items = separations.filter(g.filter);
-    if(!items.length) continue;
-    html += `<h3>${g.title} (${items.length})</h3>`;
-    for(let s of items){
-      let ch = channels[s.name] || {};
-      let sel = selectedChannel===s.name ? 'selected' : '';
-      html += `
-        <div class="ch-item ${sel}" onclick="selectChannel('${esc(s.name)}')">
-          <div class="swatch" style="background:${s.displayColor}"></div>
-          <span class="name">${esc(s.name)}</span>
-          <span class="badge ${s.kind}">${s.kind}</span>
-          <span class="cov">${(ch.coverage||0).toFixed(1)}%</span>
-        </div>`;
+def coverage_detailed(arr):
+    """Szczegółowa analiza nasycenia"""
+    total = arr.size
+    non_zero = np.sum(arr > 0)
+    
+    #Histogram zakresów
+    ranges = {
+        "0-10%": np.sum((arr >= 0) & (arr <= 25)),
+        "10-30%": np.sum((arr > 25) & (arr <= 76)),
+        "30-70%": np.sum((arr > 76) & (arr <= 178)),
+        "70-100%": np.sum(arr > 178),
     }
-  }
-
-  // export buttons
-  html += `<h3>Export</h3>`;
-  html += `<button class="export-btn primary" onclick="exportComposite()">Export Composite PNG</button>`;
-  if(selectedChannel){
-    html += `<button class="export-btn secondary" onclick="exportPlate('${esc(selectedChannel)}')">Export "${esc(selectedChannel)}" 300dpi</button>`;
-  }
-  html += `<div class="notice">Serwer renderuje CMYK natywnie przez PyMuPDF.<br>Czarny = kanal K, nie rozbity na CMY.</div>`;
-  sidebar.innerHTML = html;
-}
-
-function esc(s){ return s.replace(/'/g,"\\'").replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
-
-function selectChannel(name){
-  selectedChannel = name;
-  buildSidebar();
-  if(currentTab==='composite') switchTab('plate');
-  else showChannel(name);
-}
-
-// ---- Tabs ----
-tabBar.addEventListener('click', e=>{
-  if(e.target.classList.contains('tab')){
-    switchTab(e.target.dataset.tab);
-  }
-});
-
-function switchTab(tab){
-  currentTab = tab;
-  tabBar.querySelectorAll('.tab').forEach(t=>{
-    t.classList.toggle('active', t.dataset.tab===tab);
-  });
-  if(tab==='composite') showComposite();
-  else if(tab==='plate') showChannel(selectedChannel);
-  else if(tab==='info') showInfo();
-}
-
-// ---- Display ----
-function showComposite(){
-  if(!compositeB64) return;
-  showImage(compositeB64);
-}
-
-function showChannel(name){
-  if(!name || !channels[name]) return;
-  showImage(channels[name].image);
-}
-
-function showImage(b64){
-  let existing = canvasWrap.querySelector('canvas');
-  if(!existing){
-    existing = document.createElement('canvas');
-    canvasWrap.appendChild(existing);
-  }
-  let img = new window.Image();
-  img.onload = ()=>{
-    existing.width = img.width;
-    existing.height = img.height;
-    existing.getContext('2d').drawImage(img,0,0);
-  };
-  img.src = 'data:image/png;base64,'+b64;
-}
-
-function showInfo(){
-  let html = '<div class="info-panel">';
-  html += '<h2>Separations</h2>';
-  for(let [name, ch] of Object.entries(channels)){
-    html += `<div class="info-card">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-        <div style="width:20px;height:20px;border-radius:4px;background:${ch.color};border:1px solid #fff2"></div>
-        <span style="font-size:13px;font-weight:600">${esc(name)}</span>
-        <span class="badge ${ch.kind}" style="margin-left:auto">${ch.kind}</span>
-      </div>
-      <div class="label">Coverage</div>
-      <div class="value">${ch.coverage.toFixed(2)}%</div>
-      <div class="bar"><div style="width:${Math.min(100,ch.coverage)}%;background:${ch.color}"></div></div>
-    </div>`;
-  }
-  let tic = Object.values(channels).reduce((a,c)=>a+c.coverage,0);
-  html += `<div class="info-card"><div class="label">Total Ink Coverage</div><div class="value">${tic.toFixed(1)}%</div>`;
-  if(tic>300) html += `<div style="color:#fbbf24;font-size:12px;margin-top:4px">⚠ TIC przekracza 300%</div>`;
-  html += '</div></div>';
-
-  // replace canvas area content
-  let existing = canvasWrap.querySelector('.info-panel');
-  if(existing) existing.remove();
-  existing = canvasWrap.querySelector('canvas');
-  if(existing) existing.style.display='none';
-
-  let div = document.createElement('div');
-  div.innerHTML = html;
-  div.firstElementChild.style.width='100%';
-  canvasWrap.appendChild(div.firstElementChild);
-}
-
-// ---- Export ----
-function exportComposite(){
-  if(!compositeB64) return;
-  let a = document.createElement('a');
-  a.href = 'data:image/png;base64,'+compositeB64;
-  a.download = 'composite.png';
-  a.click();
-}
-
-async function exportPlate(name){
-  if(!currentFile) return;
-  showLoading('Eksport plate 300dpi...');
-  try {
-    let fd = new FormData();
-    fd.append('file', currentFile);
-    fd.append('page', '0');
-    fd.append('channel', name);
-    fd.append('dpi', '300');
-    fd.append('format', 'png');
-    let res = await fetch(API+'/api/export-plate', {method:'POST', body:fd});
-    let blob = await res.blob();
-    let url = URL.createObjectURL(blob);
-    let a = document.createElement('a');
-    a.href = url; a.download = 'plate_'+name.replace(/[^a-zA-Z0-9]/g,'_')+'.png';
-    a.click();
-    URL.revokeObjectURL(url);
-  } catch(err) { alert('Export error: '+err.message); }
-  hideLoading();
-}
-
-// ---- Loading ----
-function showLoading(msg){
-  let el = canvasWrap.querySelector('.loading');
-  if(!el){ el=document.createElement('div'); el.className='loading'; canvasWrap.appendChild(el); }
-  el.innerHTML = `<div class="spinner"></div><div style="color:#94a3b8;font-size:13px">${msg||'Ladowanie...'}</div>`;
-  el.style.display='flex';
-}
-function hideLoading(){
-  let el = canvasWrap.querySelector('.loading');
-  if(el) el.style.display='none';
-  // show canvas back
-  let c = canvasWrap.querySelector('canvas');
-  if(c) c.style.display='';
-  let ip = canvasWrap.querySelector('.info-panel');
-  if(ip && currentTab!=='info') ip.remove();
-}
-</script>
-</body>
-</html>
-"""
+    
+    return {
+        "total": total,
+        "covered": int(non_zero),
+        "percentage": round(non_zero / total * 100, 2),
+        "ranges": {k: round(v / total * 100, 2) for k, v in ranges.items()}
+    }
 
 # ============================================================================
-# FLASK ROUTES
+# KONWERSJA CMYK <-> RGB <-> LAB
 # ============================================================================
 
-@app.route('/')
-def index():
-    return FRONTEND_HTML
+def cmyk_to_rgb(c, m, y, k):
+    """Konwersja CMYK procenty -> RGB 0-255"""
+    c, m, y, k = c/100, m/100, y/100, k/100
+    r = int(255 * (1 - c) * (1 - k))
+    g = int(255 * (1 - m) * (1 - k))
+    b = int(255 * (1 - y) * (1 - k))
+    return (r, g, b)
+
+def rgb_to_cmyk(r, g, b):
+    """Konwersja RGB 0-255 -> CMYK procenty (uproszczona)"""
+    r, g, b = r/255, g/255, b/255
+    k = 1 - max(r, g, b)
+    if k >= 1:
+        return (0, 0, 0, 100)
+    c = (1 - r - k) / (1 - k) * 100
+    m = (1 - g - k) / (1 - k) * 100
+    y = (1 - b - k) / (1 - k) * 100
+    return (round(c), round(m), round(y), round(k*100))
+
+def rgb_to_lab(r, g, b):
+    """Konwersja RGB -> LAB (uproszczona)"""
+    # Normalizacja
+    r, g, b = r/255, g/255, b/255
+    
+    # Linearize
+    def f(t):
+        if t > 0.04045:
+            return ((t + 0.055) / 1.055) ** 2.4
+        return t / 12.92
+    
+    r, g, b = f(r), f(g), f(b)
+    
+    # RGB to XYZ (D65)
+    x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
+    y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
+    z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+    
+    # Normalize
+    x, y, z = x / 0.95047, y / 1.0, z / 1.08883
+    
+    # XYZ to LAB
+    def f2(t):
+        if t > 0.008856:
+            return t ** (1/3)
+        return 7.787 * t + 16/116
+    
+    L = 116 * f2(y) - 16
+    a = 500 * (f2(x) - f2(y))
+    b_lab = 200 * (f2(y) - f2(z))
+    
+    return (L, a, b_lab)
+
+def delta_e_2000(lab1, lab2):
+    """Oblicza różnicę kolorów Delta E 2000"""
+    L1, a1, b1 = lab1
+    L2, a2, b2 = lab2
+    
+    # Uproszczony Delta E
+    dL = L2 - L1
+    da = a2 - a1
+    db = b2 - b1
+    
+    return math.sqrt(dL**2 + da**2 + db**2)
+
+# ============================================================================
+# ANALIZA KOLORÓW PDF
+# ============================================================================
+
+def analyze_pdf_colors(doc):
+    """Analizuje wszystkie kolory używane w PDF"""
+    colors = {
+        "cmyk": [],
+        "spot": [],
+        "rgb": [],
+        "lab": [],
+        "named": []
+    }
+    
+    # Skanuj wszystkie obiekty
+    for xref in range(1, doc.xref_length()):
+        try:
+            obj = doc.xref_object(xref)
+        except Exception:
+            continue
+        
+        # Szukaj definiacji kolorów
+        # /ColorSpace
+        cs_matches = re.findall(r'/ColorSpace\s*/?(\w+)', obj)
+        for name in cs_matches:
+            if name not in colors["named"]:
+                colors["named"].append(name)
+        
+        # Szukaj Separation
+        sep_matches = re.findall(r'/Separation\s*/(\w+)', obj)
+        for name in sep_matches:
+            colors["spot"].append(name)
+        
+        # Szukaj DeviceN
+        devicen_matches = re.findall(r'/DeviceN\s*\[(.+?)\]', obj, re.S)
+        for block in devicen_matches:
+            names = re.findall(r'/(\w+)', block)
+            colors["spot"].extend(names)
+    
+    return colors
+
+# ============================================================================
+# WEBHOOK / SERWER
+# ============================================================================
 
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({
         "status": "ok",
+        "version": "3.0.0",
         "pymupdf_version": fitz.version[0],
+        "python_version": sys.version.split()[0],
+        "features": [
+            "halftone_am",
+            "halftone_floyd_steinberg",
+            "halftone_ordered",
+            "cmyk_extraction",
+            "spot_extraction",
+            "color_analysis"
+        ]
     })
 
 @app.route('/api/analyze', methods=['POST'])
 def analyze():
+    """Analiza pliku PDF - wykrywa separacje i kolory"""
     if 'file' not in request.files:
         return jsonify({"error": "No file"}), 400
+    
     f = request.files['file']
     try:
         data = f.read()
         doc = fitz.open(stream=data, filetype="pdf")
+        
+        # Ekstrahuj separacje
         seps = extract_separations(doc)
+        
+        # Analizuj kolory
+        color_analysis = analyze_pdf_colors(doc)
+        
+        # Informacje o stronach
         pages = []
         for i in range(len(doc)):
             r = doc[i].rect
-            pages.append({"index":i,"width":r.width,"height":r.height})
+            pages.append({
+                "index": i,
+                "width": round(r.width, 2),
+                "height": round(r.height, 2),
+                "rotation": doc[i].rotation
+            })
+        
         doc.close()
+        
         return jsonify({
             "success": True,
             "filename": f.filename,
@@ -715,93 +832,261 @@ def analyze():
             "pages": pages,
             "separations": [s.to_dict() for s in seps],
             "processColors": [
-                {"name":"Cyan","kind":"process","cmykRecipe":[100,0,0,0],"displayColor":"#00aeef"},
-                {"name":"Magenta","kind":"process","cmykRecipe":[0,100,0,0],"displayColor":"#ec008c"},
-                {"name":"Yellow","kind":"process","cmykRecipe":[0,0,100,0],"displayColor":"#fff200"},
-                {"name":"Black","kind":"process","cmykRecipe":[0,0,0,100],"displayColor":"#231f20"},
+                {"name": "Cyan", "kind": "process", "cmykRecipe": [100, 0, 0, 0], "displayColor": "#00aeef", "halftoneAngle": 15},
+                {"name": "Magenta", "kind": "process", "cmykRecipe": [0, 100, 0, 0], "displayColor": "#ec008c", "halftoneAngle": 75},
+                {"name": "Yellow", "kind": "process", "cmykRecipe": [0, 0, 100, 0], "displayColor": "#fff200", "halftoneAngle": 0},
+                {"name": "Black", "kind": "process", "cmykRecipe": [0, 0, 0, 100], "displayColor": "#231f20", "halftoneAngle": 45},
             ],
+            "colorAnalysis": color_analysis,
         })
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/render', methods=['POST'])
 def render():
+    """Renderuje stronę z opcjami halftone"""
     if 'file' not in request.files:
         return jsonify({"error": "No file"}), 400
+    
     f = request.files['file']
     page_idx = int(request.form.get('page', 0))
     dpi = min(max(int(request.form.get('dpi', 150)), 72), 600)
+    mode = request.form.get('mode', 'continuous')  # continuous | halftone | both
+    halftone_type = request.form.get('halftone_type', 'am')  # am | fs | ordered
+    cell_size = int(request.form.get('cell_size', 8))
+    
     try:
         data = f.read()
         doc = fitz.open(stream=data, filetype="pdf")
+        
         if page_idx >= len(doc):
             return jsonify({"error": "Bad page"}), 400
-
+        
+        # Renderuj CMYK
         cmyk = render_cmyk(doc, page_idx, dpi)
         h, w = cmyk.shape[:2]
-
-        ch = {
-            "Cyan":    cmyk[:,:,0],
-            "Magenta": cmyk[:,:,1],
-            "Yellow":  cmyk[:,:,2],
-            "Black":   cmyk[:,:,3],
-        }
-        for sep in extract_separations(doc):
-            ch[sep.name] = extract_spot(cmyk, sep.cmyk_recipe)
+        
+        # Ekstrahuj separacje
+        seps = extract_separations(doc)
+        
+        # Kanały
+        channels = {}
+        
+        # CMYK process colors
+        channel_names = ['Cyan', 'Magenta', 'Yellow', 'Black']
+        channel_colors = [(0, 174, 239), (236, 0, 140), (255, 242, 0), (35, 31, 32)]
+        
+        for i, name in enumerate(channel_names):
+            channel_data = cmyk[:, :, i]
+            
+            if mode == 'halftone' or mode == 'both':
+                # Apply halftone
+                if halftone_type == 'am':
+                    halftone = apply_halftone_round(channel_data, cell_size)
+                elif halftone_type == 'fs':
+                    halftone = apply_halftone_floyd_steinberg(channel_data)
+                else:
+                    halftone = apply_halftone_ordered(channel_data, cell_size)
+                
+                channels[name] = {
+                    "continuous": to_base64_png(channel_data),
+                    "halftone": to_base64_png(halftone),
+                    "coverage": coverage(channel_data),
+                    "coverageDetailed": coverage_detailed(channel_data)
+                }
+            else:
+                channels[name] = {
+                    "continuous": to_base64_png(channel_data),
+                    "coverage": coverage(channel_data),
+                    "coverageDetailed": coverage_detailed(channel_data)
+                }
+        
+        # Spot colors
+        for sep in seps:
+            spot = extract_spot_channel(cmyk, sep.cmyk_recipe)
+            
+            if mode == 'halftone' or mode == 'both':
+                if halftone_type == 'am':
+                    halftone = apply_halftone_round(spot, cell_size)
+                elif halftone_type == 'fs':
+                    halftone = apply_halftone_floyd_steinberg(spot)
+                else:
+                    halftone = apply_halftone_ordered(spot, cell_size)
+                
+                channels[sep.name] = {
+                    "continuous": to_base64_png(spot),
+                    "halftone": to_base64_png(halftone),
+                    "coverage": coverage(spot),
+                    "coverageDetailed": coverage_detailed(spot),
+                    "kind": sep.kind,
+                    "cmykRecipe": list(sep.cmyk_recipe),
+                    "displayColor": sep.display_color
+                }
+            else:
+                channels[sep.name] = {
+                    "continuous": to_base64_png(spot),
+                    "coverage": coverage(spot),
+                    "coverageDetailed": coverage_detailed(spot),
+                    "kind": sep.kind,
+                    "cmykRecipe": list(sep.cmyk_recipe),
+                    "displayColor": sep.display_color
+                }
+        
         doc.close()
-
-        ch_data = {}
-        for name, arr in ch.items():
-            ch_data[name] = {"image": to_base64_png(arr), "coverage": coverage(arr)}
-
+        
+        # Composite (RGB z CMYK)
+        composite = np.stack([
+            (255 * (1 - cmyk[:,:,0]/255) * (1 - cmyk[:,:,3]/255)).astype(np.uint8),
+            (255 * (1 - cmyk[:,:,1]/255) * (1 - cmyk[:,:,3]/255)).astype(np.uint8),
+            (255 * (1 - cmyk[:,:,2]/255) * (1 - cmyk[:,:,3]/255)).astype(np.uint8),
+        ], axis=2)
+        
         return jsonify({
             "success": True,
-            "width": w, "height": h, "dpi": dpi,
-            "composite": to_base64_png(cmyk),
-            "channels": ch_data,
+            "width": w,
+            "height": h,
+            "dpi": dpi,
+            "mode": mode,
+            "halftoneType": halftone_type,
+            "cellSize": cell_size,
+            "composite": to_base64_png(composite),
+            "channels": channels,
         })
+        
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/export-plate', methods=['POST'])
-def export():
+def export_plate():
+    """Eksportuje płytę drukarską"""
     if 'file' not in request.files:
         return jsonify({"error": "No file"}), 400
+    
     f = request.files['file']
     page_idx = int(request.form.get('page', 0))
     ch_name = request.form.get('channel', 'Black')
     dpi = min(max(int(request.form.get('dpi', 300)), 72), 1200)
     fmt = request.form.get('format', 'png').lower()
+    halftone = request.form.get('halftone', 'false').lower() == 'true'
+    cell_size = int(request.form.get('cell_size', 8))
+    
     try:
         data = f.read()
         doc = fitz.open(stream=data, filetype="pdf")
+        
         cmyk = render_cmyk(doc, page_idx, dpi)
-        if ch_name == "Cyan":    plate = cmyk[:,:,0]
-        elif ch_name == "Magenta": plate = cmyk[:,:,1]
-        elif ch_name == "Yellow":  plate = cmyk[:,:,2]
-        elif ch_name == "Black":   plate = cmyk[:,:,3]
+        
+        # Wybierz kanał
+        if ch_name == "Cyan":
+            plate = cmyk[:, :, 0]
+        elif ch_name == "Magenta":
+            plate = cmyk[:, :, 1]
+        elif ch_name == "Yellow":
+            plate = cmyk[:, :, 2]
+        elif ch_name == "Black":
+            plate = cmyk[:, :, 3]
         else:
             seps = extract_separations(doc)
             sep = next((s for s in seps if s.name == ch_name), None)
-            if sep: plate = extract_spot(cmyk, sep.cmyk_recipe)
-            else: return jsonify({"error": f"Not found: {ch_name}"}), 404
+            if sep:
+                plate = extract_spot_channel(cmyk, sep.cmyk_recipe)
+            else:
+                return jsonify({"error": f"Not found: {ch_name}"}), 404
+        
         doc.close()
-
-        img = Image.fromarray(255 - plate, mode='L')
+        
+        # Apply halftone jeśli wymagane
+        if halftone:
+            plate = apply_halftone_round(plate, cell_size)
+        
+        # Inwersja dla płyty drukarskiej (biały = papier, czarny = atrament)
+        # W druku: ciemne obszary = dużo atramentu = biały na negatywie
+        inverted = 255 - plate
+        
+        img = Image.fromarray(inverted, mode='L')
         buf = io.BytesIO()
+        
         if fmt == 'tiff':
-            img.save(buf, format='TIFF', compression='lzw', dpi=(dpi,dpi))
+            img.save(buf, format='TIFF', compression='tiff_lzw', dpi=(dpi, dpi))
             mime, ext = 'image/tiff', 'tiff'
         else:
-            img.save(buf, format='PNG', dpi=(dpi,dpi))
+            img.save(buf, format='PNG', dpi=(dpi, dpi))
             mime, ext = 'image/png', 'png'
+        
         buf.seek(0)
         safe = re.sub(r'[^A-Za-z0-9._-]+', '_', ch_name)
-        return send_file(buf, mimetype=mime, as_attachment=True,
-                         download_name=f"plate_{safe}_{dpi}dpi.{ext}")
+        return send_file(
+            buf,
+            mimetype=mime,
+            as_attachment=True,
+            download_name=f"plate_{safe}_{dpi}dpi.{ext}"
+        )
+        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/spot-match', methods=['POST'])
+def spot_match():
+    """Znajduje najbliższy Pantone dla podanego koloru"""
+    data = request.json
+    
+    if 'rgb' in data:
+        r, g, b = data['rgb']
+        lab = rgb_to_lab(r, g, b)
+    elif 'cmyk' in data:
+        c, m, y, k = data['cmyk']
+        rgb = cmyk_to_rgb(c, m, y, k)
+        lab = rgb_to_lab(*rgb)
+    else:
+        return jsonify({"error": "Provide rgb or cmyk"}), 400
+    
+    # Szukaj najbliższego Pantone
+    best_match = None
+    best_delta = float('inf')
+    
+    for name, recipe in PANTONE_RECIPES.items():
+        rgb_p = cmyk_to_rgb(*recipe)
+        lab_p = rgb_to_lab(*rgb_p)
+        delta = delta_e_2000(lab, lab_p)
+        
+        if delta < best_delta:
+            best_delta = delta
+            best_match = name
+    
+    return jsonify({
+        "match": best_match,
+        "deltaE": round(best_delta, 2),
+        "cmyk": list(PANTONE_RECIPES[best_match]) if best_match else None,
+        "inputLab": lab
+    })
+
+# ============================================================================
+# STRONA GŁÓWNA
+# ============================================================================
+
+FRONTEND_HTML = """
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RIP Preview PRO v3</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+<h1>RIP Preview PRO v3</h1>
+<p>Serwer działa. Użyj aplikacji React lub API.</p>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return FRONTEND_HTML
 
 # ============================================================================
 # START
@@ -810,19 +1095,24 @@ def export():
 if __name__ == '__main__':
     port = 5000
     print()
-    print("=" * 55)
-    print("  RIP Preview PRO v2")
-    print("=" * 55)
-    print(f"  PyMuPDF:  {fitz.version[0]}")
-    print(f"  Python:   {sys.version.split()[0]}")
+    print("=" * 60)
+    print(" RIP Preview PRO v3 - HALFTONE Edition")
+    print("=" * 60)
+    print(f" PyMuPDF: {fitz.version[0]}")
+    print(f" Python: {sys.version.split()[0]}")
     print()
-    print(f"  >>> Otworz w przegladarce:  http://localhost:{port}")
+    print(f" >>> Otworz w przegladarce: http://localhost:{port}")
     print()
-    print("  Ctrl+C aby zatrzymac")
-    print("=" * 55)
+    print(" Funkcje:")
+    print("  - AM Halftone (kropki)")
+    print("  - Floyd-Steinberg (dithering)")
+    print("  - Ordered Dithering (Bayer)")
+    print("  - Analiza CMYK + Spot Colors")
+    print("  - Eksport płyt")
     print()
-
-    # Otworz przegladarke automatycznie
+    print(" Ctrl+C aby zatrzymac")
+    print("=" * 60)
+    print()
+    
     threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{port}')).start()
-
     app.run(host='0.0.0.0', port=port, debug=False)

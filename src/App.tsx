@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
+
 import { FileUploader } from './components/FileUploader';
 import { ChannelToggle } from './components/ChannelToggle';
 import { PreviewCanvas } from './components/PreviewCanvas';
@@ -10,6 +11,7 @@ import {
   renderPage as serverRenderPage,
   exportPlate,
   downloadBlob,
+  matchSpotColor,
   type SeparationInfo,
   type RenderResult,
 } from './utils/api';
@@ -28,14 +30,27 @@ import {
   Server,
   ServerOff,
   AlertTriangle,
+  Circle,
+  Grid,
+  Shuffle,
+  Target,
 } from 'lucide-react';
 
 type TabType = 'composite' | 'plates' | 'halftone' | 'info';
+type HalftoneType = 'am' | 'fs' | 'ordered';
+type RenderMode = 'continuous' | 'halftone' | 'both';
 
 interface ChannelData {
   name: string;
   imageBase64: string;
+  halftoneBase64?: string;
   coverage: number;
+  coverageDetailed?: {
+    total: number;
+    covered: number;
+    percentage: number;
+    ranges: Record<string, number>;
+  };
   kind: 'process' | 'spot' | 'tech';
   cmykRecipe: [number, number, number, number];
   displayColor: string;
@@ -70,8 +85,9 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // Halftone settings
-  const [cellSize, setCellSize] = useState(4);
-  const [minDot, setMinDot] = useState(1.0);
+  const [renderMode, setRenderMode] = useState<RenderMode>('both');
+  const [halftoneType, setHalftoneType] = useState<HalftoneType>('am');
+  const [cellSize, setCellSize] = useState(8);
   const [halftoneAngles, setHalftoneAngles] = useState<Record<string, number>>({
     ...DEFAULT_HALFTONE_ANGLES,
   });
@@ -109,35 +125,29 @@ export default function App() {
       setFileName(name);
 
       try {
-        // Create File object from ArrayBuffer
         const blob = new Blob([data], { type: 'application/pdf' });
         const fileObj = new File([blob], name, { type: 'application/pdf' });
         setFile(fileObj);
 
-        // Analyze PDF
         const analysis = await analyzePdf(fileObj);
         setPageCount(analysis.pageCount);
         setCurrentPage(0);
 
-        // Combine process and spot separations
         const allSeps = [...analysis.processColors, ...analysis.separations];
         setSeparations(allSeps);
 
-        // Enable all channels
         const enabled: Record<string, boolean> = {};
         for (const sep of allSeps) {
           enabled[sep.name] = true;
         }
         setEnabledChannels(enabled);
 
-        // Set halftone angles
         const angles: Record<string, number> = { ...DEFAULT_HALFTONE_ANGLES };
         analysis.separations.forEach((s, i) => {
           angles[s.name] = (30 + i * 15) % 90;
         });
         setHalftoneAngles(angles);
 
-        // Render first page
         setLoadingMessage('Rendering page...');
         await loadPage(fileObj, 0, dpi);
 
@@ -160,24 +170,32 @@ export default function App() {
       setLoadingMessage(`Rendering page ${pageIndex + 1}...`);
 
       try {
-        const result: RenderResult = await serverRenderPage(fileObj, pageIndex, renderDpi);
+        const result: RenderResult = await serverRenderPage(
+          fileObj,
+          pageIndex,
+          renderDpi,
+          renderMode,
+          halftoneType,
+          cellSize
+        );
 
         setImageSize({ width: result.width, height: result.height });
         setCompositeImage(result.composite);
 
-        // Build channel data
         const channelList: ChannelData[] = [];
-        
+
         for (const sep of separations) {
           const chData = result.channels[sep.name];
           if (chData) {
             channelList.push({
               name: sep.name,
-              imageBase64: chData.image,
+              imageBase64: chData.continuous || chData.image || '',
+              halftoneBase64: chData.halftone,
               coverage: chData.coverage,
-              kind: sep.kind,
-              cmykRecipe: sep.cmykRecipe,
-              displayColor: sep.displayColor,
+              coverageDetailed: chData.coverageDetailed,
+              kind: chData.kind || sep.kind,
+              cmykRecipe: chData.cmykRecipe || sep.cmykRecipe,
+              displayColor: chData.displayColor || sep.displayColor,
             });
           }
         }
@@ -191,17 +209,17 @@ export default function App() {
         setLoadingMessage('');
       }
     },
-    [separations]
+    [separations, renderMode, halftoneType, cellSize]
   );
 
-  // Reload when page or DPI changes
+  // Reload when page, DPI or halftone settings change
   useEffect(() => {
     if (file && separations.length > 0) {
       loadPage(file, currentPage, dpi);
     }
-  }, [currentPage, dpi]);
+  }, [currentPage, dpi, renderMode, halftoneType, cellSize]);
 
-  // Convert base64 to ImageData for canvas
+  // Convert base64 to ImageData
   const base64ToImageData = useCallback(
     async (base64: string): Promise<ImageData | null> => {
       return new Promise((resolve) => {
@@ -221,7 +239,7 @@ export default function App() {
     []
   );
 
-  // Composite image for display
+  // Composite image
   const [compositeImageData, setCompositeImageData] = useState<ImageData | null>(null);
   useEffect(() => {
     if (compositeImage) {
@@ -231,12 +249,18 @@ export default function App() {
 
   // Selected plate image
   const [selectedPlateImageData, setSelectedPlateImageData] = useState<ImageData | null>(null);
+  const [selectedHalftoneImageData, setSelectedHalftoneImageData] = useState<ImageData | null>(null);
+  
   useEffect(() => {
     const ch = channels.find((c) => c.name === selectedChannel);
     if (ch) {
       base64ToImageData(ch.imageBase64).then(setSelectedPlateImageData);
+      if (ch.halftoneBase64) {
+        base64ToImageData(ch.halftoneBase64).then(setSelectedHalftoneImageData);
+      }
     } else {
       setSelectedPlateImageData(null);
+      setSelectedHalftoneImageData(null);
     }
   }, [selectedChannel, channels, base64ToImageData]);
 
@@ -272,13 +296,25 @@ export default function App() {
   }, []);
 
   const handleExportPlate = useCallback(
-    async (channelName: string) => {
+    async (channelName: string, withHalftone: boolean = false) => {
       if (!file) return;
       setIsLoading(true);
       setLoadingMessage(`Exporting ${channelName}...`);
       try {
-        const blob = await exportPlate(file, currentPage, channelName, 300, 'png');
-        downloadBlob(blob, `plate_${channelName.replace(/[^a-zA-Z0-9]/g, '_')}.png`);
+        const blob = await exportPlate(
+          file,
+          currentPage,
+          channelName,
+          300,
+          'png',
+          withHalftone,
+          cellSize
+        );
+        const suffix = withHalftone ? `_halftone_${halftoneType}` : '';
+        downloadBlob(
+          blob,
+          `plate_${channelName.replace(/[^a-zA-Z0-9]/g, '_')}${suffix}_300dpi.png`
+        );
       } catch (err) {
         alert(`Export error: ${err instanceof Error ? err.message : 'Unknown error'}`);
       } finally {
@@ -286,7 +322,7 @@ export default function App() {
         setLoadingMessage('');
       }
     },
-    [file, currentPage]
+    [file, currentPage, halftoneType, cellSize]
   );
 
   const handleExportComposite = useCallback(() => {
@@ -316,17 +352,10 @@ export default function App() {
     [selectedChannel, separations]
   );
 
-  const displayImage = useMemo(() => {
-    switch (activeTab) {
-      case 'composite':
-        return compositeImageData;
-      case 'plates':
-      case 'halftone':
-        return selectedPlateImageData;
-      default:
-        return compositeImageData;
-    }
-  }, [activeTab, compositeImageData, selectedPlateImageData]);
+  const selectedChannelData = useMemo(
+    () => channels.find((c) => c.name === selectedChannel),
+    [selectedChannel, channels]
+  );
 
   // =========================================================================
   // RENDER: No file loaded
@@ -334,16 +363,15 @@ export default function App() {
   if (!file) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
-        {/* Header */}
         <header className="border-b border-slate-700/50 bg-slate-900/80 backdrop-blur-sm px-6 py-4">
           <div className="flex items-center gap-3">
             <div className="bg-gradient-to-br from-cyan-500 to-blue-600 rounded-lg p-2">
               <Printer className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-white">RIP Preview PRO v2</h1>
+              <h1 className="text-xl font-bold text-white">RIP Preview PRO v3</h1>
               <p className="text-xs text-slate-400">
-                True CMYK Separation • Spot Colors • Die-Cut Detection
+                True CMYK Separation • Spot Colors • Halftone Dots
               </p>
             </div>
             <div className="ml-auto flex items-center gap-2">
@@ -367,10 +395,8 @@ export default function App() {
           </div>
         </header>
 
-        {/* Main content */}
         <div className="flex-1 flex items-center justify-center p-8">
           <div className="max-w-2xl w-full space-y-6">
-            {/* Server status warning */}
             {serverOnline === false && (
               <div className="bg-red-900/30 border border-red-700/50 rounded-xl p-5">
                 <h2 className="text-lg font-bold text-red-400 flex items-center gap-2 mb-3">
@@ -394,35 +420,39 @@ export default function App() {
               </div>
             )}
 
-            {/* File uploader */}
             <FileUploader onFileLoad={handleFileLoad} isLoading={isLoading} />
 
-            {/* Features */}
-            <div className="grid grid-cols-3 gap-4 text-center">
+            <div className="grid grid-cols-4 gap-4 text-center">
               <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50">
                 <Layers className="w-8 h-8 text-cyan-400 mx-auto mb-2" />
-                <h3 className="text-sm font-medium text-white">True CMYK</h3>
-                <p className="text-xs text-slate-400 mt-1">Native CMYK rendering</p>
+                <h3 className="text-sm font-medium text-white">CMYK</h3>
+                <p className="text-xs text-slate-400 mt-1">Native rendering</p>
               </div>
               <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50">
                 <Palette className="w-8 h-8 text-orange-400 mx-auto mb-2" />
                 <h3 className="text-sm font-medium text-white">Spot Colors</h3>
-                <p className="text-xs text-slate-400 mt-1">Pantone & custom inks</p>
+                <p className="text-xs text-slate-400 mt-1">Pantone matching</p>
               </div>
               <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50">
-                <Scissors className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
-                <h3 className="text-sm font-medium text-white">Die-Cut Lines</h3>
-                <p className="text-xs text-slate-400 mt-1">Technical layer detection</p>
+                <Circle className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
+                <h3 className="text-sm font-medium text-white">Halftone</h3>
+                <p className="text-xs text-slate-400 mt-1">Dot preview</p>
+              </div>
+              <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50">
+                <Scissors className="w-8 h-8 text-purple-400 mx-auto mb-2" />
+                <h3 className="text-sm font-medium text-white">Die-Cut</h3>
+                <p className="text-xs text-slate-400 mt-1">Tech detection</p>
               </div>
             </div>
 
             <div className="bg-slate-800/30 rounded-lg p-4 border border-slate-700/30 text-xs text-slate-400">
-              <p className="text-cyan-400 font-medium mb-2">Server-based processing:</p>
+              <p className="text-cyan-400 font-medium mb-2">Nowe funkcje v3:</p>
               <ul className="space-y-1">
-                <li>• <strong>PyMuPDF</strong> for native CMYK rendering (not RGB conversion)</li>
-                <li>• Real /Separation and /DeviceN colorspace extraction</li>
-                <li>• Accurate spot color channel separation</li>
-                <li>• High-DPI plate export (up to 1200 DPI)</li>
+                <li>• <strong>AM Halftone</strong> - klasyczne kropki drukarskie</li>
+                <li>• <strong>Floyd-Steinberg</strong> - error diffusion dithering</li>
+                <li>• <strong>Ordered Dithering</strong> - Bayer matrix</li>
+                <li>• Szczegółowa analiza nasycenia (0-10%, 10-30%, 30-70%, 70-100%)</li>
+                <li>• Konfigurowalny rozmiar komórki kropki (4-16px)</li>
               </ul>
             </div>
           </div>
@@ -432,18 +462,17 @@ export default function App() {
   }
 
   // =========================================================================
-  // RENDER: File loaded - main UI
+  // RENDER: File loaded
   // =========================================================================
   return (
     <div className="h-screen flex flex-col bg-slate-900 text-white overflow-hidden">
-      {/* Header */}
       <header className="shrink-0 border-b border-slate-700/50 bg-slate-900/90 backdrop-blur-sm px-4 py-2">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
             <div className="bg-gradient-to-br from-cyan-500 to-blue-600 rounded-md p-1.5">
               <Printer className="w-4 h-4 text-white" />
             </div>
-            <h1 className="text-sm font-bold text-white">RIP Preview PRO</h1>
+            <h1 className="text-sm font-bold text-white">RIP Preview PRO v3</h1>
           </div>
 
           <div className="h-4 w-px bg-slate-700" />
@@ -457,7 +486,6 @@ export default function App() {
 
           <span className="text-xs text-slate-400 truncate max-w-48">{fileName}</span>
 
-          {/* Page navigation */}
           {pageCount > 1 && (
             <div className="flex items-center gap-1 ml-2">
               <button
@@ -480,7 +508,6 @@ export default function App() {
             </div>
           )}
 
-          {/* DPI selector */}
           <div className="flex items-center gap-2 ml-auto">
             <label className="text-xs text-slate-500">DPI:</label>
             <select
@@ -506,12 +533,12 @@ export default function App() {
         {/* Sidebar */}
         <aside
           className={`shrink-0 border-r border-slate-700/50 bg-slate-850 overflow-y-auto transition-all ${
-            sidebarOpen ? 'w-72' : 'w-0'
+            sidebarOpen ? 'w-80' : 'w-0'
           }`}
           style={{ backgroundColor: '#161b2e' }}
         >
           {sidebarOpen && (
-            <div className="p-3 space-y-4">
+            <div className="p-4 space-y-5">
               {/* Process Colors */}
               <div>
                 <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
@@ -603,12 +630,36 @@ export default function App() {
                 </div>
               )}
 
-              {/* No spots found */}
-              {spotChannels.length === 0 && techChannels.length === 0 && (
-                <div className="bg-slate-700/30 border border-slate-600/30 rounded-lg p-3">
-                  <p className="text-slate-400 text-xs">
-                    No spot colors or technical layers detected in this PDF.
-                  </p>
+              {/* Coverage Details */}
+              {selectedChannelData?.coverageDetailed && (
+                <div>
+                  <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                    Nasycenie (Dot Coverage)
+                  </h3>
+                  <div className="bg-slate-900/50 rounded-lg p-3 space-y-2">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-slate-400">Całkowite pokrycie:</span>
+                      <span className="text-white font-medium">{selectedChannelData.coverageDetailed.percentage.toFixed(1)}%</span>
+                    </div>
+                    <div className="text-xs text-slate-500 space-y-1">
+                      <div className="flex justify-between">
+                        <span>0-10% (jasne)</span>
+                        <span>{selectedChannelData.coverageDetailed.ranges?.["0-10%"]?.toFixed(1) || 0}%</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>10-30% (lekkie)</span>
+                        <span>{selectedChannelData.coverageDetailed.ranges?.["10-30%"]?.toFixed(1) || 0}%</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>30-70% (średnie)</span>
+                        <span>{selectedChannelData.coverageDetailed.ranges?.["30-70%"]?.toFixed(1) || 0}%</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>70-100% (ciężkie)</span>
+                        <span>{selectedChannelData.coverageDetailed.ranges?.["70-100%"]?.toFixed(1) || 0}%</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -631,7 +682,7 @@ export default function App() {
                   <Download className="w-3.5 h-3.5" />
                   Export
                 </h3>
-                <div className="space-y-1.5">
+                <div className="space-y-2">
                   <button
                     onClick={handleExportComposite}
                     className="w-full text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg px-3 py-2 transition-colors"
@@ -639,12 +690,21 @@ export default function App() {
                     Export Composite
                   </button>
                   {selectedChannel && (
-                    <button
-                      onClick={() => handleExportPlate(selectedChannel)}
-                      className="w-full text-xs bg-slate-700 hover:bg-slate-600 text-white rounded-lg px-3 py-2 transition-colors"
-                    >
-                      Export "{selectedChannel}" (300 DPI)
-                    </button>
+                    <>
+                      <button
+                        onClick={() => handleExportPlate(selectedChannel, false)}
+                        className="w-full text-xs bg-slate-700 hover:bg-slate-600 text-white rounded-lg px-3 py-2 transition-colors"
+                      >
+                        Export "{selectedChannel}" (300 DPI)
+                      </button>
+                      <button
+                        onClick={() => handleExportPlate(selectedChannel, true)}
+                        className="w-full text-xs bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg px-3 py-2 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Circle className="w-3 h-3" />
+                        Export z Halftone
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
@@ -684,7 +744,7 @@ export default function App() {
             <TabButton
               active={activeTab === 'halftone'}
               onClick={() => setActiveTab('halftone')}
-              icon={<Grid3X3 className="w-3.5 h-3.5" />}
+              icon={<Circle className="w-3.5 h-3.5" />}
               label="Halftone"
               disabled={!selectedChannel}
             />
@@ -711,16 +771,99 @@ export default function App() {
 
           {/* Halftone controls */}
           {activeTab === 'halftone' && selectedSep && (
-            <div className="shrink-0 px-4 py-2 bg-slate-800/70 border-b border-slate-700/50">
-              <HalftoneSettings
-                cellSize={cellSize}
-                angle={halftoneAngles[selectedChannel] ?? 45}
-                minDot={minDot}
-                isTech={selectedSep.kind === 'tech'}
-                onCellSizeChange={setCellSize}
-                onAngleChange={(a) => handleAngleChange(selectedChannel, a)}
-                onMinDotChange={setMinDot}
-              />
+            <div className="shrink-0 px-4 py-3 bg-slate-800/70 border-b border-slate-700/50">
+              <div className="flex items-center gap-6">
+                {/* Render Mode */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">Tryb:</span>
+                  <div className="flex gap-1">
+                    {(['continuous', 'halftone', 'both'] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        onClick={() => setRenderMode(mode)}
+                        className={`text-xs px-2 py-1 rounded transition-colors ${
+                          renderMode === mode
+                            ? 'bg-cyan-600 text-white'
+                            : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                        }`}
+                      >
+                        {mode === 'continuous' ? 'Continuous' : mode === 'halftone' ? 'Halftone' : 'Both'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Halftone Type */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">Typ:</span>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => setHalftoneType('am')}
+                      className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
+                        halftoneType === 'am'
+                          ? 'bg-cyan-600 text-white'
+                          : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                      }`}
+                      title="AM Halftone - kropki drukarskie"
+                    >
+                      <Target className="w-3 h-3" />
+                      AM
+                    </button>
+                    <button
+                      onClick={() => setHalftoneType('fs')}
+                      className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
+                        halftoneType === 'fs'
+                          ? 'bg-cyan-600 text-white'
+                          : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                      }`}
+                      title="Floyd-Steinberg - error diffusion"
+                    >
+                      <Shuffle className="w-3 h-3" />
+                      FS
+                    </button>
+                    <button
+                      onClick={() => setHalftoneType('ordered')}
+                      className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
+                        halftoneType === 'ordered'
+                          ? 'bg-cyan-600 text-white'
+                          : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                      }`}
+                      title="Ordered Dithering - Bayer matrix"
+                    >
+                      <Grid className="w-3 h-3" />
+                      Ordered
+                    </button>
+                  </div>
+                </div>
+
+                {/* Cell Size */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">Komórka:</span>
+                  <input
+                    type="range"
+                    min="4"
+                    max="16"
+                    value={cellSize}
+                    onChange={(e) => setCellSize(Number(e.target.value))}
+                    className="w-24"
+                  />
+                  <span className="text-xs text-white font-mono w-8">{cellSize}px</span>
+                </div>
+
+                {/* Angle */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">Kąt:</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="90"
+                    value={halftoneAngles[selectedChannel] ?? 45}
+                    onChange={(e) => handleAngleChange(selectedChannel, Number(e.target.value))}
+                    className="w-20"
+                  />
+                  <span className="text-xs text-white font-mono w-8">{halftoneAngles[selectedChannel] ?? 45}°</span>
+                </div>
+              </div>
             </div>
           )}
 
@@ -743,9 +886,16 @@ export default function App() {
                 imageSize={imageSize}
                 channels={channels}
               />
+            ) : activeTab === 'halftone' ? (
+              <HalftonePreview
+                continuousImage={selectedPlateImageData}
+                halftoneImage={selectedHalftoneImageData}
+                channelName={selectedChannel}
+                mode={renderMode}
+              />
             ) : (
               <PreviewCanvas
-                imageData={displayImage}
+                imageData={activeTab === 'plates' ? selectedPlateImageData : compositeImageData}
                 title={
                   activeTab === 'composite'
                     ? 'Composite CMYK Preview'
@@ -759,6 +909,10 @@ export default function App() {
     </div>
   );
 }
+
+// ============================================================================
+// SUB-COMPONENTS
+// ============================================================================
 
 function TabButton({
   active,
@@ -777,20 +931,78 @@ function TabButton({
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`
-        flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors
-        ${
-          active
-            ? 'bg-cyan-600 text-white'
-            : disabled
-            ? 'text-slate-600 cursor-not-allowed'
-            : 'text-slate-400 hover:text-white hover:bg-slate-700'
-        }
-      `}
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+        active
+          ? 'bg-cyan-600 text-white'
+          : disabled
+          ? 'text-slate-600 cursor-not-allowed'
+          : 'text-slate-400 hover:text-white hover:bg-slate-700'
+      }`}
     >
       {icon}
       {label}
     </button>
+  );
+}
+
+function HalftonePreview({
+  continuousImage,
+  halftoneImage,
+  channelName,
+  mode,
+}: {
+  continuousImage: ImageData | null;
+  halftoneImage: ImageData | null;
+  channelName: string;
+  mode: 'continuous' | 'halftone' | 'both';
+}) {
+  return (
+    <div className="h-full flex">
+      {(mode === 'continuous' || mode === 'both') && continuousImage && (
+        <div className="flex-1 flex flex-col border-r border-slate-700">
+          <div className="shrink-0 px-4 py-2 bg-slate-800/50 border-b border-slate-700/50">
+            <span className="text-xs text-slate-400">Continuous Tone</span>
+          </div>
+          <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-slate-900/50">
+            <canvas
+              ref={(canvas) => {
+                if (canvas && continuousImage) {
+                  canvas.width = continuousImage.width;
+                  canvas.height = continuousImage.height;
+                  canvas.getContext('2d')!.putImageData(continuousImage, 0, 0);
+                }
+              }}
+              className="max-w-full max-h-full shadow-lg"
+            />
+          </div>
+        </div>
+      )}
+      {(mode === 'halftone' || mode === 'both') && halftoneImage && (
+        <div className="flex-1 flex flex-col">
+          <div className="shrink-0 px-4 py-2 bg-slate-800/50 border-b border-slate-700/50">
+            <span className="text-xs text-cyan-400">Halftone Dots Preview</span>
+          </div>
+          <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-slate-900/50">
+            <canvas
+              ref={(canvas) => {
+                if (canvas && halftoneImage) {
+                  canvas.width = halftoneImage.width;
+                  canvas.height = halftoneImage.height;
+                  canvas.getContext('2d')!.putImageData(halftoneImage, 0, 0);
+                }
+              }}
+              className="max-w-full max-h-full shadow-lg"
+              style={{ imageRendering: 'pixelated' }}
+            />
+          </div>
+        </div>
+      )}
+      {!continuousImage && !halftoneImage && (
+        <div className="flex-1 flex items-center justify-center text-slate-500">
+          <p>Wybierz kanał z panelu bocznego</p>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -811,7 +1023,6 @@ function InfoPanel({
 
   return (
     <div className="h-full overflow-y-auto p-6 space-y-6">
-      {/* Document Info */}
       <div className="bg-slate-800/50 rounded-xl p-5 border border-slate-700/50">
         <h2 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
           <Info className="w-5 h-5 text-cyan-400" />
@@ -825,14 +1036,13 @@ function InfoPanel({
         </div>
       </div>
 
-      {/* Separations */}
       <div className="bg-slate-800/50 rounded-xl p-5 border border-slate-700/50">
         <h2 className="text-lg font-bold text-white mb-4">Color Separations</h2>
         <div className="grid gap-3">
           {channels.map((ch) => (
             <div key={ch.name} className="flex items-center gap-3 bg-slate-900/50 rounded-lg p-3">
               <div
-                className="w-8 h-8 rounded-md border border-white/10"
+                className="w-10 h-10 rounded-md border border-white/10"
                 style={{ backgroundColor: ch.displayColor }}
               />
               <div className="flex-1">
@@ -850,27 +1060,34 @@ function InfoPanel({
                     {ch.kind === 'process' ? 'Process' : ch.kind === 'tech' ? 'Technical' : 'Spot'}
                   </span>
                 </div>
-                <div className="flex items-center gap-3 mt-1">
-                  <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                <div className="flex items-center gap-3 mt-1.5">
+                  <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
                     <div
-                      className="h-full rounded-full"
+                      className="h-full rounded-full transition-all"
                       style={{
                         width: `${Math.min(100, ch.coverage)}%`,
                         backgroundColor: ch.displayColor,
                       }}
                     />
                   </div>
-                  <span className="text-xs text-slate-400 font-mono w-14 text-right">
+                  <span className="text-xs text-slate-400 font-mono w-16 text-right">
                     {ch.coverage.toFixed(1)}%
                   </span>
                 </div>
+                {ch.coverageDetailed && (
+                  <div className="flex gap-2 mt-2 text-xs text-slate-500">
+                    <span>C: {ch.cmykRecipe[0]}%</span>
+                    <span>M: {ch.cmykRecipe[1]}%</span>
+                    <span>Y: {ch.cmykRecipe[2]}%</span>
+                    <span>K: {ch.cmykRecipe[3]}%</span>
+                  </div>
+                )}
               </div>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Total Coverage */}
       <div className="bg-slate-800/50 rounded-xl p-5 border border-slate-700/50">
         <h2 className="text-lg font-bold text-white mb-4">Ink Coverage Summary</h2>
         <div className="text-center">
@@ -879,6 +1096,11 @@ function InfoPanel({
           {totalCoverage > 300 && (
             <div className="text-sm text-amber-400 mt-2">
               ⚠️ TIC exceeds 300% — may cause printing issues
+            </div>
+          )}
+          {totalCoverage < 100 && (
+            <div className="text-sm text-cyan-400 mt-2">
+              💡 Low ink usage — good for economy printing
             </div>
           )}
         </div>

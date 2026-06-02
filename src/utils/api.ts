@@ -1,24 +1,29 @@
 /**
- * API client for RIP Preview Server
+ * API client for RIP Preview Server v3
+ * Updated with Halftone support
  */
 
 // Auto-detect API base URL
-// If served from Flask server (localhost:5000), use relative path
-// If opened as file:// or from another server, connect to localhost:5000
 function getApiBase(): string {
   const loc = window.location;
   if (loc.port === '5000') {
-    return '/api'; // Same server
+    return '/api';
   }
   return 'http://localhost:5000/api';
 }
 
 const API_BASE = getApiBase();
 
+// ============================================================================
+// TYPY DANYCH
+// ============================================================================
+
 export interface ServerStatus {
   status: string;
+  version: string;
   pymupdf_version: string;
-  capabilities: string[];
+  python_version: string;
+  features: string[];
 }
 
 export interface PageInfo {
@@ -33,6 +38,29 @@ export interface SeparationInfo {
   kind: 'process' | 'spot' | 'tech';
   cmykRecipe: [number, number, number, number];
   displayColor: string;
+  halftoneAngle?: number;
+}
+
+export interface CoverageDetailed {
+  total: number;
+  covered: number;
+  percentage: number;
+  ranges: {
+    "0-10%": number;
+    "10-30%": number;
+    "30-70%": number;
+    "70-100%": number;
+  };
+}
+
+export interface ChannelData {
+  image?: string;           // continuous tone
+  halftone?: string;        // halftone version
+  coverage: number;
+  coverageDetailed?: CoverageDetailed;
+  kind?: 'process' | 'spot' | 'tech';
+  cmykRecipe?: [number, number, number, number];
+  displayColor?: string;
 }
 
 export interface AnalyzeResult {
@@ -42,12 +70,14 @@ export interface AnalyzeResult {
   pages: PageInfo[];
   separations: SeparationInfo[];
   processColors: SeparationInfo[];
+  colorAnalysis?: {
+    cmyk: string[];
+    spot: string[];
+    rgb: string[];
+    lab: string[];
+    named: string[];
+  };
   error?: string;
-}
-
-export interface ChannelData {
-  image: string; // base64
-  coverage: number;
 }
 
 export interface RenderResult {
@@ -55,10 +85,17 @@ export interface RenderResult {
   width: number;
   height: number;
   dpi: number;
-  composite: string; // base64
+  mode: 'continuous' | 'halftone' | 'both';
+  halftoneType: 'am' | 'fs' | 'ordered';
+  cellSize: number;
+  composite: string;
   channels: Record<string, ChannelData>;
   error?: string;
 }
+
+// ============================================================================
+// FUNKCJE API
+// ============================================================================
 
 /**
  * Check if server is running
@@ -77,7 +114,7 @@ export async function checkServerHealth(): Promise<ServerStatus | null> {
 }
 
 /**
- * Analyze PDF file
+ * Analyze PDF file - extracts separations and colors
  */
 export async function analyzePdf(file: File): Promise<AnalyzeResult> {
   const formData = new FormData();
@@ -98,16 +135,29 @@ export async function analyzePdf(file: File): Promise<AnalyzeResult> {
 
 /**
  * Render page with channel separation
+ * 
+ * @param file - PDF file
+ * @param page - Page index (0-based)
+ * @param dpi - Resolution
+ * @param mode - 'continuous' | 'halftone' | 'both'
+ * @param halftoneType - 'am' (AM Halftone) | 'fs' (Floyd-Steinberg) | 'ordered' (Bayer)
+ * @param cellSize - Halftone cell size (4-16)
  */
 export async function renderPage(
   file: File,
   page: number,
-  dpi: number
+  dpi: number,
+  mode: 'continuous' | 'halftone' | 'both' = 'both',
+  halftoneType: 'am' | 'fs' | 'ordered' = 'am',
+  cellSize: number = 8
 ): Promise<RenderResult> {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('page', page.toString());
   formData.append('dpi', dpi.toString());
+  formData.append('mode', mode);
+  formData.append('halftone_type', halftoneType);
+  formData.append('cell_size', cellSize.toString());
 
   const response = await fetch(`${API_BASE}/render`, {
     method: 'POST',
@@ -123,14 +173,49 @@ export async function renderPage(
 }
 
 /**
+ * Find closest Pantone color
+ */
+export async function matchSpotColor(
+  rgb?: [number, number, number],
+  cmyk?: [number, number, number, number]
+): Promise<{
+  match: string;
+  deltaE: number;
+  cmyk: [number, number, number, number];
+  inputLab: [number, number, number];
+}> {
+  const response = await fetch(`${API_BASE}/spot-match`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rgb, cmyk }),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to match spot color');
+  }
+
+  return response.json();
+}
+
+/**
  * Export single plate
+ * 
+ * @param file - PDF file
+ * @param page - Page index
+ * @param channel - Channel name
+ * @param dpi - Resolution
+ * @param format - 'png' | 'tiff'
+ * @param halftone - Apply halftone
+ * @param cellSize - Halftone cell size
  */
 export async function exportPlate(
   file: File,
   page: number,
   channel: string,
   dpi: number,
-  format: 'png' | 'tiff' = 'png'
+  format: 'png' | 'tiff' = 'png',
+  halftone: boolean = false,
+  cellSize: number = 8
 ): Promise<Blob> {
   const formData = new FormData();
   formData.append('file', file);
@@ -138,6 +223,8 @@ export async function exportPlate(
   formData.append('channel', channel);
   formData.append('dpi', dpi.toString());
   formData.append('format', format);
+  formData.append('halftone', halftone.toString());
+  formData.append('cell_size', cellSize.toString());
 
   const response = await fetch(`${API_BASE}/export-plate`, {
     method: 'POST',
