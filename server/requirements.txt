@@ -1,0 +1,8 @@
+# RIP Preview Server Requirements
+# Install with: pip install -r requirements.txt
+
+PyMuPDF>=1.24.0
+flask>=3.0.0
+flask-cors>=4.0.0
+Pillow>=10.0.0
+numpy>=1.24.0
