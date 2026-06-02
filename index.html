@@ -3,8 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESKO Prepress Viewer - Analiza Separacji i Spot Color</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <title>RIP Preview - Prawdziwe Separacje i Spot Color</title>
+    <!-- Parsowanie PDF i separacje wykonuje serwer (rip_server.py / Ghostscript) -->
+    <!-- Frontend nie potrzebuje już pdf.js w przeglądarce. -->
+    <meta name="color-scheme" content="dark">
+
     <style>
         * {
             margin: 0;
@@ -666,7 +669,8 @@
                 <span>Analiza separacji • Spot Color • Overprint</span>
             </div>
         </div>
-        <div style="display: flex; gap: 8px;">
+        <div style="display: flex; gap: 8px; align-items: center;">
+            <span id="engineBadge" style="font-size:0.72rem; font-weight:700; padding:6px 10px; border-radius:6px; background:#333; color:#aaa;">● Serwer: sprawdzam…</span>
             <button class="toolbar-btn" onclick="exportSeparations()">
                 📥 Export Separacji
             </button>
@@ -726,6 +730,15 @@
                     <button class="view-btn active" onclick="setView('single')" id="viewSingle">Pojedynczy</button>
                     <button class="view-btn" onclick="setView('composite')" id="viewComposite">Composite</button>
                     <button class="view-btn" onclick="setView('grid')" id="viewGrid">Grid</button>
+                </div>
+                <div class="view-toggle" title="Podgląd separacji jak RIP">
+                    <button class="view-btn active" id="modeContinuous" onclick="setRenderMode('continuous')">Ciągły ton</button>
+                    <button class="view-btn" id="modeHalftone" onclick="setRenderMode('halftone')">Rastr (kropki)</button>
+                </div>
+                <div style="display:flex; align-items:center; gap:6px; margin-left:8px; font-size:0.78rem; color:var(--text-dim);">
+                    <span>Rastr px</span>
+                    <input type="range" id="cellSize" min="3" max="20" value="8" style="width:90px; accent-color:var(--accent);" oninput="onCellSizeInput(this.value)">
+                    <span id="cellSizeVal" style="min-width:20px; font-weight:700; color:var(--text);">8</span>
                 </div>
             </div>
             
@@ -867,544 +880,452 @@
     </div>
 
     <script>
-        // Konfiguracja PDF.js
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-        
-        // Stan aplikacji
-        const state = {
-            file: null,
-            pdfDocument: null,
-            currentPage: 1,
-            totalPages: 1,
-            zoom: 1,
-            separations: [],
-            spotColors: [],
-            activeSeparation: null,
-            viewMode: 'single',
-            exportFormat: 'png',
-            inverted: false,
-            warnings: []
-        };
-        
-        // Stałe kolorów
-        const CMYK_COLORS = {
-            'Cyan': { c: 100, m: 0, y: 0, k: 0, rgb: '#00aae7' },
-            'Magenta': { c: 0, m: 100, y: 0, k: 0, rgb: '#ff0055' },
-            'Yellow': { c: 0, m: 0, y: 100, k: 0, rgb: '#ffee00' },
-            'Black': { c: 0, m: 0, y: 0, k: 100, rgb: '#222222' }
-        };
-        
-        // Przykładowe spot colors (w prawdziwej aplikacji byłyby wykrywane z PDF)
-        const SPOT_COLORS = {
-            'PANTONE 185 C': { rgb: '#E4002B', cmyk: [0, 100, 87, 0] },
-            'PANTONE 286 C': { rgb: '#0033A0', cmyk: [100, 68, 0, 26] },
-            'PANTONE 368 C': { rgb: '#78BE20', cmyk: [47, 0, 87, 0] },
-            'PANTONE 877 C': { rgb: '#C0C0C0', cmyk: [0, 0, 0, 25] }
-        };
-        
-        // Drag & Drop
-        const dropZone = document.getElementById('dropZone');
-        
-        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-            dropZone.addEventListener(eventName, preventDefaults);
-            document.body.addEventListener(eventName, preventDefaults);
-        });
-        
-        function preventDefaults(e) {
-            e.preventDefault();
-            e.stopPropagation();
+    // ============================================================================
+    //  ESKO Prepress Viewer  —  REAL separations via Python RIP server
+    //  - Prawdziwe separacje C/M/Y/K + każdy spot/Pantone/diecut DOKŁADNIE jak w pliku
+    //    (silnik Ghostscript tiffsep po stronie serwera).
+    //  - Podgląd separacji "jak RIP": tryb Rastr (kropki) = natężenie koloru.
+    //  Serwer: rip_server.py  (http://localhost:5000)
+    // ============================================================================
+
+    const API_BASE = (location.port === '5000')
+        ? '/api'
+        : 'http://localhost:5000/api';
+
+    const state = {
+        file: null,
+        fileName: '',
+        totalPages: 1,
+        currentPage: 0,           // 0-based dla serwera
+        zoom: 1,
+        engine: null,             // 'ghostscript' | 'pymupdf'
+        serverOnline: false,
+        separations: [],          // [{name,kind,coverage,displayColor,cmykRecipe,continuous,halftone,hasInk}]
+        spotColors: [],
+        activeSeparation: 0,
+        viewMode: 'single',
+        renderMode: 'continuous', // 'continuous' | 'halftone'
+        cellSize: 8,
+        dpi: 150,
+        inverted: false,
+        warnings: [],
+    };
+
+    const PROCESS_ORDER = { 'cyan': 0, 'magenta': 1, 'yellow': 2, 'black': 3 };
+
+    // ----------------------------------------------------------------------
+    //  Serwer / status
+    // ----------------------------------------------------------------------
+    async function checkServer() {
+        const badge = document.getElementById('engineBadge');
+        try {
+            const r = await fetch(API_BASE + '/health', { signal: AbortSignal.timeout(4000) });
+            if (!r.ok) throw new Error('bad');
+            const j = await r.json();
+            state.serverOnline = true;
+            state.engine = j.engine || (j.ghostscript ? 'ghostscript' : 'pymupdf');
+            if (state.engine === 'ghostscript') {
+                badge.textContent = '● Separacje: Ghostscript (PRAWDZIWE)';
+                badge.style.background = '#0c3b2e';
+                badge.style.color = '#6ee7b7';
+                badge.title = 'Ghostscript wykryty: czytamy realne płyty C/M/Y/K + spot + diecut z pliku.';
+            } else {
+                badge.textContent = '● Separacje: PyMuPDF (przybliżone)';
+                badge.style.background = '#3b2f0c';
+                badge.style.color = '#fcd34d';
+                badge.title = 'Brak Ghostscript — separacje spot są przybliżone. Zainstaluj Ghostscript dla pełnej wierności.';
+            }
+        } catch (e) {
+            state.serverOnline = false;
+            badge.textContent = '● Serwer OFFLINE — uruchom rip_server.py';
+            badge.style.background = '#3b0c0c';
+            badge.style.color = '#fca5a5';
+            badge.title = 'Uruchom serwer: cd server && python rip_server.py';
         }
-        
-        ['dragenter', 'dragover'].forEach(eventName => {
-            dropZone.addEventListener(eventName, () => {
-                dropZone.classList.add('dragover');
-            });
-        });
-        
-        ['dragleave', 'drop'].forEach(eventName => {
-            dropZone.addEventListener(eventName, () => {
-                dropZone.classList.remove('dragover');
-            });
-        });
-        
-        dropZone.addEventListener('drop', (e) => {
-            const file = e.dataTransfer.files[0];
-            if (file) handleFile(file);
-        });
-        
-        // Obsługa pliku
-        async function handleFile(file) {
-            if (!file) return;
-            
-            state.file = file;
-            showLoading('Analizowanie pliku...');
-            
-            const extension = file.name.split('.').pop().toLowerCase();
-            
-            try {
-                if (extension === 'pdf') {
-                    await loadPDF(file);
-                } else if (extension === 'tiff' || extension === 'tif') {
-                    await loadTIFF(file);
-                } else {
-                    throw new Error('Nieobsługiwany format pliku');
-                }
-            } catch (error) {
-                hideLoading();
-                showError('Błąd ładowania pliku: ' + error.message);
+    }
+
+    // ----------------------------------------------------------------------
+    //  Drag & drop / wybór pliku
+    // ----------------------------------------------------------------------
+    const dropZone = document.getElementById('dropZone');
+    ['dragenter','dragover','dragleave','drop'].forEach(ev => {
+        dropZone.addEventListener(ev, preventDefaults);
+        document.body.addEventListener(ev, preventDefaults);
+    });
+    function preventDefaults(e){ e.preventDefault(); e.stopPropagation(); }
+    ['dragenter','dragover'].forEach(ev => dropZone.addEventListener(ev, () => dropZone.classList.add('dragover')));
+    ['dragleave','drop'].forEach(ev => dropZone.addEventListener(ev, () => dropZone.classList.remove('dragover')));
+    dropZone.addEventListener('drop', (e) => {
+        const f = e.dataTransfer.files[0];
+        if (f) handleFile(f);
+    });
+
+    async function handleFile(file) {
+        if (!file) return;
+        if (!state.serverOnline) {
+            await checkServer();
+            if (!state.serverOnline) {
+                showError('Serwer RIP nie działa.\n\nUruchom:\n  cd server\n  python rip_server.py\n\nNastępnie wgraj plik ponownie.');
+                return;
             }
         }
-        
-        // Ładowanie PDF
-        async function loadPDF(file) {
-            const arrayBuffer = await file.arrayBuffer();
-            state.pdfDocument = await pdfjsLib.getDocument(arrayBuffer).promise;
-            
-            state.totalPages = state.pdfDocument.numPages;
-            state.currentPage = 1;
-            
-            // Symulacja wykrywania separacji (w prawdziwej aplikacji analiza PDF)
-            await simulateSeparationDetection();
-            
-            // Renderuj pierwszą stronę
-            await renderPage(state.currentPage);
-            
-            // Aktualizuj UI
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (ext !== 'pdf') {
+            showError('Ta wersja czyta prawdziwe separacje z plików PDF.\nWyeksportuj AI/EPS do PDF (z zachowaniem spot colors) i wgraj ponownie.');
+            return;
+        }
+        state.file = file;
+        state.fileName = file.name;
+        showLoading('Analizuję separacje w pliku…');
+        try {
+            await analyzeFile(file);
+            showLoading('Renderuję płyty (RIP)…');
+            await renderCurrentPage();
             updateFileInfo();
             updateSeparationsList();
             updateSpotColorsList();
-            analyzeWarnings();
-            
-            hideLoading();
-            showEmptyState(false);
-        }
-        
-        // Symulacja wykrywania separacji
-        async function simulateSeparationDetection() {
-            // W prawdziwej aplikacji tutaj byłaby analiza zawartości PDF
-            state.separations = [
-                { name: 'Cyan', type: 'process', color: CMYK_COLORS.Cyan, coverage: 45 },
-                { name: 'Magenta', type: 'process', color: CMYK_COLORS.Magenta, coverage: 32 },
-                { name: 'Yellow', type: 'process', color: CMYK_COLORS.Yellow, coverage: 78 },
-                { name: 'Black', type: 'process', color: CMYK_COLORS.Black, coverage: 91 }
-            ];
-            
-            // Losowe spot colors dla demonstracji
-            if (Math.random() > 0.5) {
-                const spotKeys = Object.keys(SPOT_COLORS);
-                const numSpots = Math.floor(Math.random() * 2) + 1;
-                state.spotColors = spotKeys.slice(0, numSpots).map(key => ({
-                    name: key,
-                    ...SPOT_COLORS[key]
-                }));
-                
-                state.separations.push(...state.spotColors.map(sc => ({
-                    name: sc.name.replace('PANTONE ', '').replace(' C', ''),
-                    type: 'spot',
-                    color: { rgb: sc.rgb, cmyk: sc.cmyk },
-                    coverage: Math.floor(Math.random() * 30) + 5
-                })));
-            }
-            
-            // Symulacja ostrzeżeń
-            state.warnings = [];
-            if (Math.random() > 0.7) {
-                state.warnings.push({ type: 'overprint', message: 'Wykryto overprint na tekście' });
-            }
-            if (Math.random() > 0.8) {
-                state.warnings.push({ type: 'trap', message: 'Możliwy problem z trappingiem' });
-            }
-            if (Math.random() > 0.6) {
-                state.warnings.push({ type: 'bleed', message: 'Bleed może być niewystarczający' });
-            }
-        }
-        
-        // Renderowanie strony PDF
-        async function renderPage(pageNum) {
-            const page = await state.pdfDocument.getPage(pageNum);
-            const canvas = document.getElementById('previewCanvas');
-            const context = canvas.getContext('2d');
-            
-            const viewport = page.getViewport({ scale: 2 * state.zoom });
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            
-            await page.render({
-                canvasContext: context,
-                viewport: viewport
-            }).promise;
-            
-            canvas.style.display = 'block';
-        }
-        
-        // Aktualizacja informacji o pliku
-        function updateFileInfo() {
-            const fileInfoCard = document.getElementById('fileInfoCard');
-            const sizeKB = Math.round(state.file.size / 1024);
-            
-            fileInfoCard.innerHTML = `
-                <div class="file-info-row">
-                    <span class="file-info-label">Nazwa</span>
-                    <span class="file-info-value">${state.file.name}</span>
-                </div>
-                <div class="file-info-row">
-                    <span class="file-info-label">Rozmiar</span>
-                    <span class="file-info-value">${sizeKB} KB</span>
-                </div>
-                <div class="file-info-row">
-                    <span class="file-info-label">Strony</span>
-                    <span class="file-info-value">${state.totalPages}</span>
-                </div>
-                <div class="file-info-row">
-                    <span class="file-info-label">Typ</span>
-                    <span class="file-info-value">PDF Document</span>
-                </div>
-            `;
-            
-            document.getElementById('fileInfoSection').style.display = 'block';
-        }
-        
-        // Aktualizacja listy separacji
-        function updateSeparationsList() {
-            const list = document.getElementById('separationsList');
-            list.innerHTML = '';
-            
-            state.separations.forEach((sep, index) => {
-                const item = document.createElement('div');
-                item.className = `separation-item ${index === 0 ? 'active' : ''}`;
-                item.onclick = () => selectSeparation(index);
-                
-                const colorClass = sep.type === 'spot' ? 'spot' : `cmyk-${sep.name.charAt(0).toLowerCase()}`;
-                
-                item.innerHTML = `
-                    <div class="separation-color ${colorClass}" style="background: ${sep.color.rgb || sep.color}"></div>
-                    <div class="separation-info">
-                        <div class="separation-name">${sep.name}</div>
-                        <div class="separation-type">${sep.type === 'process' ? 'CMYK' : 'Spot'}</div>
-                    </div>
-                    <span class="separation-badge">${sep.coverage}%</span>
-                `;
-                
-                list.appendChild(item);
-            });
-            
-            document.getElementById('separationsSection').style.display = 'block';
-            state.activeSeparation = 0;
-        }
-        
-        // Aktualizacja listy spot colors
-        function updateSpotColorsList() {
-            const list = document.getElementById('spotColorsList');
-            
-            if (state.spotColors.length === 0) {
-                document.getElementById('spotColorSection').style.display = 'none';
-                return;
-            }
-            
-            list.innerHTML = state.spotColors.map(sc => `
-                <div class="spot-color-item">
-                    <div class="spot-color-header">
-                        <span class="spot-color-name">
-                            <span class="spot-preview" style="background: ${sc.rgb}"></span>
-                            ${sc.name}
-                        </span>
-                    </div>
-                    <div class="spot-color-values">
-                        <span>RGB: ${sc.rgb}</span>
-                        <span>C:${sc.cmyk[0]} M:${sc.cmyk[1]} Y:${sc.cmyk[2]} K:${sc.cmyk[3]}</span>
-                    </div>
-                </div>
-            `).join('');
-            
-            document.getElementById('spotColorSection').style.display = 'block';
-        }
-        
-        // Analiza ostrzeżeń
-        function analyzeWarnings() {
-            const alertsList = document.getElementById('alertsList');
-            const alertsSection = document.getElementById('alertsSection');
-            const overprintAlert = document.getElementById('overprintAlert');
-            
-            if (state.warnings.length === 0) {
-                alertsSection.style.display = 'none';
-                overprintAlert.style.display = 'none';
-                return;
-            }
-            
-            alertsList.innerHTML = state.warnings.map(w => `
-                <div class="alert-box ${w.type === 'overprint' ? 'error' : ''}">
-                    <div class="alert-title">
-                        ${w.type === 'overprint' ? '🚨' : w.type === 'trap' ? '⚠️' : '📐'}
-                        ${w.type.toUpperCase()}
-                    </div>
-                    <ul class="alert-list">
-                        <li>${w.message}</li>
-                    </ul>
-                </div>
-            `).join('');
-            
-            alertsSection.style.display = 'block';
-            
-            if (state.warnings.some(w => w.type === 'overprint')) {
-                overprintAlert.style.display = 'block';
-            }
-        }
-        
-        // Wybór separacji
-        function selectSeparation(index) {
-            state.activeSeparation = index;
-            
-            document.querySelectorAll('.separation-item').forEach((item, i) => {
-                item.classList.toggle('active', i === index);
-            });
-            
-            const sep = state.separations[index];
-            
-            // Aktualizuj podgląd koloru
-            const preview = document.getElementById('colorPreviewLarge');
-            preview.style.background = sep.color.rgb || sep.color;
-            preview.innerHTML = '';
-            
-            // Aktualizuj właściwości
-            const props = document.getElementById('colorProperties');
-            props.innerHTML = `
-                <div class="property-row">
-                    <span class="property-label">Nazwa</span>
-                    <span class="property-value">${sep.name}</span>
-                </div>
-                <div class="property-row">
-                    <span class="property-label">Typ</span>
-                    <span class="property-value">${sep.type === 'process' ? 'CMYK Process' : 'Spot Color'}</span>
-                </div>
-                <div class="property-row">
-                    <span class="property-label">RGB</span>
-                    <span class="property-value">${sep.color.rgb || '-'}</span>
-                </div>
-                <div class="property-row">
-                    <span class="property-label">CMYK</span>
-                    <span class="property-value">${sep.color.cmyk ? `C:${sep.color.cmyk[0]} M:${sep.color.cmyk[1]} Y:${sep.color.cmyk[2]} K:${sep.color.cmyk[3]}` : '-'}</span>
-                </div>
-                <div class="property-row">
-                    <span class="property-label">Pokrycie</span>
-                    <span class="property-value">${sep.coverage}%</span>
-                </div>
-            `;
-            
-            // Aktualizuj statystyki
             updateStats();
+            showEmptyState(false);
+            selectSeparation(0);
+        } catch (err) {
+            console.error(err);
+            showError('Błąd: ' + (err && err.message ? err.message : err));
+        } finally {
+            hideLoading();
         }
-        
-        // Aktualizacja statystyk
-        function updateStats() {
-            document.getElementById('statPages').textContent = state.totalPages;
-            document.getElementById('statSeparations').textContent = state.separations.length;
-            document.getElementById('statSpots').textContent = state.spotColors.length;
-            document.getElementById('statWarnings').textContent = state.warnings.length;
+    }
+
+    // ----------------------------------------------------------------------
+    //  API: analyze + render
+    // ----------------------------------------------------------------------
+    async function analyzeFile(file) {
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await fetch(API_BASE + '/analyze', { method: 'POST', body: fd });
+        if (!r.ok) {
+            const e = await r.json().catch(() => ({error:'Server error'}));
+            throw new Error(e.error || 'Analiza nie powiodła się');
         }
-        
-        // Zoom
-        function zoomIn() {
-            state.zoom = Math.min(state.zoom * 1.25, 5);
-            if (state.pdfDocument) renderPage(state.currentPage);
+        const j = await r.json();
+        if (j.engine) state.engine = j.engine;
+        state.totalPages = j.pageCount || 1;
+        state.currentPage = 0;
+        return j;
+    }
+
+    async function renderCurrentPage() {
+        const fd = new FormData();
+        fd.append('file', state.file);
+        fd.append('page', String(state.currentPage));
+        fd.append('dpi', String(state.dpi));
+        // zawsze pobieramy oba: ciągły + rastr — przełączanie bez ponownego renderu
+        fd.append('mode', 'both');
+        fd.append('halftone_type', 'am');
+        fd.append('cell_size', String(state.cellSize));
+
+        const r = await fetch(API_BASE + '/render', { method: 'POST', body: fd });
+        if (!r.ok) {
+            const e = await r.json().catch(() => ({error:'Server error'}));
+            throw new Error(e.error || 'Renderowanie nie powiodło się');
         }
-        
-        function zoomOut() {
-            state.zoom = Math.max(state.zoom / 1.25, 0.25);
-            if (state.pdfDocument) renderPage(state.currentPage);
+        const j = await r.json();
+        if (j.engine) state.engine = j.engine;
+
+        const seps = [];
+        for (const [name, ch] of Object.entries(j.channels)) {
+            seps.push({
+                name,
+                kind: ch.kind || 'process',
+                coverage: (typeof ch.coverage === 'number') ? Math.round(ch.coverage) : 0,
+                displayColor: ch.displayColor || '#888',
+                cmykRecipe: ch.cmykRecipe || [0,0,0,0],
+                continuous: ch.continuous || ch.image || '',
+                halftone: ch.halftone || '',
+                hasInk: (ch.coverage || 0) > 0,
+            });
         }
-        
-        function resetZoom() {
-            state.zoom = 1;
-            if (state.pdfDocument) renderPage(state.currentPage);
-        }
-        
-        // Invert
-        function toggleInvert() {
-            state.inverted = !state.inverted;
-            document.getElementById('invertBtn').classList.toggle('active', state.inverted);
-            updatePreview();
-        }
-        
-        function updatePreview() {
-            const canvas = document.getElementById('previewCanvas');
-            if (state.inverted) {
-                canvas.style.filter = 'invert(1)';
-            } else {
-                canvas.style.filter = 'none';
-            }
-        }
-        
-        // Tryby widoku
-        function setView(mode) {
-            state.viewMode = mode;
-            
-            document.querySelectorAll('.view-btn').forEach(btn => btn.classList.remove('active'));
-            document.getElementById('view' + mode.charAt(0).toUpperCase() + mode.slice(1)).classList.add('active');
-            
-            if (mode === 'composite' || mode === 'grid') {
-                showCompositeView();
-            } else {
-                showSingleView();
-            }
-        }
-        
-        function showSingleView() {
-            const container = document.getElementById('previewContainer');
-            document.querySelector('.composite-grid')?.remove();
-            document.getElementById('emptyState').style.display = 'none';
-            document.getElementById('previewCanvas').style.display = 'block';
-        }
-        
-        function showCompositeView() {
-            const container = document.getElementById('previewContainer');
-            document.getElementById('emptyState').style.display = 'none';
-            document.getElementById('previewCanvas').style.display = 'none';
-            
-            let grid = document.querySelector('.composite-grid');
-            if (!grid) {
-                grid = document.createElement('div');
-                grid.className = 'composite-grid';
-                container.insertBefore(grid, document.getElementById('previewCanvas'));
-            }
-            
-            grid.innerHTML = state.separations.map((sep, i) => `
-                <div class="composite-item" onclick="selectSeparation(${i})">
-                    <canvas id="sepCanvas${i}"></canvas>
-                    <div class="composite-label">
-                        ${sep.name}
-                        <span style="opacity: 0.5">(${sep.coverage}%)</span>
-                    </div>
+        // sortowanie: CMYK -> spot -> tech
+        seps.sort((a, b) => {
+            const ka = a.kind === 'process' ? (PROCESS_ORDER[a.name.toLowerCase()] ?? 9) : (a.kind === 'spot' ? 50 : 80);
+            const kb = b.kind === 'process' ? (PROCESS_ORDER[b.name.toLowerCase()] ?? 9) : (b.kind === 'spot' ? 50 : 80);
+            if (ka !== kb) return ka - kb;
+            return a.name.localeCompare(b.name);
+        });
+        state.separations = seps;
+        state.spotColors = seps.filter(s => s.kind !== 'process');
+        return j;
+    }
+
+    function b64ToSrc(b64) { return b64 ? ('data:image/png;base64,' + b64) : ''; }
+
+    // ----------------------------------------------------------------------
+    //  Wyświetlanie aktywnej separacji w głównym canvas
+    // ----------------------------------------------------------------------
+    function drawSeparationToCanvas(sep) {
+        const canvas = document.getElementById('previewCanvas');
+        const ctx = canvas.getContext('2d');
+        const src = (state.renderMode === 'halftone' && sep.halftone) ? sep.halftone : sep.continuous;
+        if (!src) return;
+        const img = new Image();
+        img.onload = () => {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
+            canvas.style.display = 'block';
+            applyCanvasTransform();
+        };
+        img.src = b64ToSrc(src);
+    }
+
+    function applyCanvasTransform() {
+        const canvas = document.getElementById('previewCanvas');
+        canvas.style.transform = `scale(${state.zoom})`;
+        canvas.style.transformOrigin = 'top left';
+        canvas.style.filter = state.inverted ? 'invert(1)' : 'none';
+    }
+
+    // ----------------------------------------------------------------------
+    //  UI: lewy panel — lista separacji
+    // ----------------------------------------------------------------------
+    function kindBadge(kind) {
+        if (kind === 'process') return 'CMYK';
+        if (kind === 'tech') return 'Diecut/Tech';
+        return 'Spot';
+    }
+
+    function updateSeparationsList() {
+        const list = document.getElementById('separationsList');
+        list.innerHTML = '';
+        state.separations.forEach((sep, index) => {
+            const item = document.createElement('div');
+            item.className = `separation-item ${index === state.activeSeparation ? 'active' : ''}`;
+            item.onclick = () => selectSeparation(index);
+            const empty = sep.hasInk ? '' : ' style="opacity:.45"';
+            item.innerHTML = `
+                <div class="separation-color" style="background:${sep.displayColor}; border:1px solid rgba(255,255,255,.2)"></div>
+                <div class="separation-info"${empty}>
+                    <div class="separation-name">${sep.name}</div>
+                    <div class="separation-type">${kindBadge(sep.kind)}${sep.hasInk ? '' : ' • pusta'}</div>
                 </div>
-            `).join('');
-            
-            // Renderuj separacje do canvas
-            renderSeparations();
+                <span class="separation-badge">${sep.coverage}%</span>`;
+            list.appendChild(item);
+        });
+        document.getElementById('separationsSection').style.display = 'block';
+    }
+
+    function updateSpotColorsList() {
+        const list = document.getElementById('spotColorsList');
+        if (state.spotColors.length === 0) {
+            document.getElementById('spotColorSection').style.display = 'none';
+            return;
         }
-        
-        async function renderSeparations() {
-            // W prawdziwej aplikacji tutaj byłoby renderowanie poszczególnych kanałów
-            // Na razie symulacja z kolorami
-            state.separations.forEach((sep, i) => {
-                const canvas = document.getElementById(`sepCanvas${i}`);
-                if (canvas) {
-                    const ctx = canvas.getContext('2d');
-                    canvas.width = 300;
-                    canvas.height = 300;
-                    
-                    // Tworzenie gradientu dla wizualizacji
-                    const gradient = ctx.createLinearGradient(0, 0, 300, 300);
-                    const baseColor = sep.color.rgb || sep.color;
-                    
-                    // Parsowanie koloru
-                    let r = 50, g = 50, b = 50;
-                    if (baseColor.startsWith('#')) {
-                        r = parseInt(baseColor.slice(1, 3), 16);
-                        g = parseInt(baseColor.slice(3, 5), 16);
-                        b = parseInt(baseColor.slice(5, 7), 16);
-                    }
-                    
-                    gradient.addColorStop(0, `rgba(${r},${g},${b},0.1)`);
-                    gradient.addColorStop(1, `rgba(${r},${g},${b},${sep.coverage / 100})`);
-                    
-                    ctx.fillStyle = gradient;
-                    ctx.fillRect(0, 0, 300, 300);
-                    
-                    // Dodanie tekstury
-                    ctx.fillStyle = `rgba(${r},${g},${b},0.3)`;
-                    for (let x = 0; x < 300; x += 10) {
-                        for (let y = 0; y < 300; y += 10) {
-                            if ((x + y) % 20 === 0) {
-                                ctx.fillRect(x, y, 5, 5);
-                            }
-                        }
-                    }
-                }
-            });
+        list.innerHTML = state.spotColors.map(sc => `
+            <div class="spot-color-item">
+                <div class="spot-color-header">
+                    <span class="spot-color-name">
+                        <span class="spot-preview" style="background:${sc.displayColor}"></span>
+                        ${sc.name}
+                    </span>
+                </div>
+                <div class="spot-color-values">
+                    <span>${kindBadge(sc.kind)}</span>
+                    <span>C:${sc.cmykRecipe[0]} M:${sc.cmykRecipe[1]} Y:${sc.cmykRecipe[2]} K:${sc.cmykRecipe[3]}</span>
+                </div>
+            </div>`).join('');
+        document.getElementById('spotColorSection').style.display = 'block';
+    }
+
+    function updateFileInfo() {
+        const card = document.getElementById('fileInfoCard');
+        const sizeKB = Math.round(state.file.size / 1024);
+        card.innerHTML = `
+            <div class="file-info-row"><span class="file-info-label">Nazwa</span><span class="file-info-value">${state.fileName}</span></div>
+            <div class="file-info-row"><span class="file-info-label">Rozmiar</span><span class="file-info-value">${sizeKB} KB</span></div>
+            <div class="file-info-row"><span class="file-info-label">Strony</span><span class="file-info-value">${state.totalPages}</span></div>
+            <div class="file-info-row"><span class="file-info-label">Silnik</span><span class="file-info-value">${state.engine === 'ghostscript' ? 'Ghostscript (prawdziwe)' : 'PyMuPDF (przybl.)'}</span></div>`;
+        document.getElementById('fileInfoSection').style.display = 'block';
+    }
+
+    function updateStats() {
+        document.getElementById('statPages').textContent = state.totalPages;
+        document.getElementById('statSeparations').textContent = state.separations.length;
+        document.getElementById('statSpots').textContent = state.spotColors.length;
+        document.getElementById('statWarnings').textContent = state.separations.filter(s => !s.hasInk).length;
+    }
+
+    function selectSeparation(index) {
+        if (!state.separations.length) return;
+        state.activeSeparation = index;
+        document.querySelectorAll('.separation-item').forEach((it, i) => it.classList.toggle('active', i === index));
+        const sep = state.separations[index];
+        const preview = document.getElementById('colorPreviewLarge');
+        preview.style.background = sep.displayColor;
+        preview.innerHTML = '';
+        const props = document.getElementById('colorProperties');
+        const r = sep.cmykRecipe;
+        props.innerHTML = `
+            <div class="property-row"><span class="property-label">Nazwa</span><span class="property-value">${sep.name}</span></div>
+            <div class="property-row"><span class="property-label">Typ</span><span class="property-value">${kindBadge(sep.kind)}</span></div>
+            <div class="property-row"><span class="property-label">Podgląd</span><span class="property-value">${sep.displayColor}</span></div>
+            <div class="property-row"><span class="property-label">CMYK</span><span class="property-value">C:${r[0]} M:${r[1]} Y:${r[2]} K:${r[3]}</span></div>
+            <div class="property-row"><span class="property-label">Pokrycie</span><span class="property-value">${sep.coverage}%</span></div>`;
+        if (state.viewMode === 'single') drawSeparationToCanvas(sep);
+    }
+
+    // ----------------------------------------------------------------------
+    //  Tryby widoku
+    // ----------------------------------------------------------------------
+    function setView(mode) {
+        state.viewMode = mode;
+        document.querySelectorAll('.view-btn').forEach(b => {});
+        ['Single','Composite','Grid'].forEach(m => {
+            const el = document.getElementById('view'+m);
+            if (el) el.classList.toggle('active', m.toLowerCase() === mode);
+        });
+        if (mode === 'composite' || mode === 'grid') showGridView();
+        else showSingleView();
+    }
+
+    function showSingleView() {
+        document.querySelector('.composite-grid')?.remove();
+        document.getElementById('emptyState').style.display = 'none';
+        const sep = state.separations[state.activeSeparation];
+        if (sep) drawSeparationToCanvas(sep);
+    }
+
+    function showGridView() {
+        const container = document.getElementById('previewContainer');
+        document.getElementById('emptyState').style.display = 'none';
+        document.getElementById('previewCanvas').style.display = 'none';
+        let grid = document.querySelector('.composite-grid');
+        if (!grid) {
+            grid = document.createElement('div');
+            grid.className = 'composite-grid';
+            container.insertBefore(grid, document.getElementById('previewCanvas'));
         }
-        
-        // Obsługa TIFF (uproszczona)
-        async function loadTIFF(file) {
-            // TIFF wymaga dodatkowej biblioteki - tutaj uproszczona wersja
-            showLoading('Ładowanie TIFF...');
-            
-            const img = new Image();
-            img.onload = () => {
-                const canvas = document.getElementById('previewCanvas');
-                canvas.width = img.width;
-                canvas.height = img.height;
-                canvas.getContext('2d').drawImage(img, 0, 0);
-                canvas.style.display = 'block';
-                
-                // Symulacja wykrywania kanałów
-                state.separations = [
-                    { name: 'Cyan', type: 'process', color: CMYK_COLORS.Cyan, coverage: 40 },
-                    { name: 'Magenta', type: 'process', color: CMYK_COLORS.Magenta, coverage: 35 },
-                    { name: 'Yellow', type: 'process', color: CMYK_COLORS.Yellow, coverage: 60 },
-                    { name: 'Black', type: 'process', color: CMYK_COLORS.Black, coverage: 80 }
-                ];
-                
-                state.totalPages = 1;
-                updateFileInfo();
-                updateSeparationsList();
-                updateStats();
-                
-                hideLoading();
-                showEmptyState(false);
-            };
-            img.src = URL.createObjectURL(file);
+        grid.innerHTML = state.separations.map((sep, i) => {
+            const src = (state.renderMode === 'halftone' && sep.halftone) ? sep.halftone : sep.continuous;
+            return `
+            <div class="composite-item" onclick="selectSeparation(${i}); setView('single')">
+                <img src="${b64ToSrc(src)}" style="width:100%; display:block; background:#fff; border-radius:6px;${sep.hasInk?'':'opacity:.4'}">
+                <div class="composite-label">
+                    <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${sep.displayColor};margin-right:6px;vertical-align:middle"></span>
+                    ${sep.name} <span style="opacity:.5">(${sep.coverage}%)</span>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    function refreshActiveView() {
+        if (state.viewMode === 'single') {
+            const sep = state.separations[state.activeSeparation];
+            if (sep) drawSeparationToCanvas(sep);
+        } else {
+            showGridView();
         }
-        
-        // Modal eksportu
-        function exportSeparations() {
-            if (state.separations.length === 0) {
-                showError('Najpierw wgraj plik z separacjami');
-                return;
+    }
+
+    // ----------------------------------------------------------------------
+    //  Tryb renderu: ciągły / rastr  +  rozmiar rastra
+    // ----------------------------------------------------------------------
+    function setRenderMode(mode) {
+        state.renderMode = mode;
+        document.getElementById('modeContinuous').classList.toggle('active', mode === 'continuous');
+        document.getElementById('modeHalftone').classList.toggle('active', mode === 'halftone');
+        refreshActiveView();
+    }
+
+    let _cellTimer = null;
+    function onCellSizeInput(v) {
+        state.cellSize = parseInt(v, 10);
+        document.getElementById('cellSizeVal').textContent = v;
+        // rastr zależy od rozmiaru -> ponowny render (debounce)
+        if (_cellTimer) clearTimeout(_cellTimer);
+        _cellTimer = setTimeout(async () => {
+            if (!state.file) return;
+            showLoading('Przeliczam rastr…');
+            try { await renderCurrentPage(); updateSeparationsList(); refreshActiveView(); }
+            catch (e) { showError('Błąd renderu: ' + e.message); }
+            finally { hideLoading(); }
+        }, 350);
+    }
+
+    // ----------------------------------------------------------------------
+    //  Zoom / invert
+    // ----------------------------------------------------------------------
+    function zoomIn(){ state.zoom = Math.min(state.zoom*1.25, 6); applyCanvasTransform(); }
+    function zoomOut(){ state.zoom = Math.max(state.zoom/1.25, 0.2); applyCanvasTransform(); }
+    function resetZoom(){ state.zoom = 1; applyCanvasTransform(); }
+    function toggleInvert(){
+        state.inverted = !state.inverted;
+        document.getElementById('invertBtn').classList.toggle('active', state.inverted);
+        applyCanvasTransform();
+    }
+    function updatePreview(){ applyCanvasTransform(); }
+
+    // ----------------------------------------------------------------------
+    //  Export — prawdziwe płyty z serwera
+    // ----------------------------------------------------------------------
+    function exportSeparations() {
+        if (!state.separations.length) { showError('Najpierw wgraj plik PDF.'); return; }
+        document.getElementById('exportModal').classList.add('active');
+    }
+    function closeExportModal(){ document.getElementById('exportModal').classList.remove('active'); }
+    function selectExportFormat(format){
+        state.exportFormat = format;
+        document.querySelectorAll('.modal-option').forEach(opt =>
+            opt.classList.toggle('selected', opt.onclick.toString().includes("'"+format+"'")));
+    }
+
+    async function confirmExport() {
+        const fmt = (state.exportFormat === 'tiff') ? 'tiff' : 'png';
+        const withHalftone = (state.renderMode === 'halftone');
+        closeExportModal();
+        showLoading('Eksportuję płyty…');
+        try {
+            for (const sep of state.separations) {
+                const fd = new FormData();
+                fd.append('file', state.file);
+                fd.append('page', String(state.currentPage));
+                fd.append('channel', sep.name);
+                fd.append('dpi', '300');
+                fd.append('format', fmt);
+                fd.append('halftone', withHalftone ? 'true' : 'false');
+                fd.append('cell_size', String(state.cellSize));
+                const r = await fetch(API_BASE + '/export-plate', { method: 'POST', body: fd });
+                if (!r.ok) continue;
+                const blob = await r.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                const safe = sep.name.replace(/[^a-zA-Z0-9._-]+/g, '_');
+                a.href = url;
+                a.download = `plate_${safe}_300dpi.${fmt}`;
+                a.click();
+                URL.revokeObjectURL(url);
             }
-            document.getElementById('exportModal').classList.add('active');
+            alert(`Eksport zakończony!\nFormat: ${fmt.toUpperCase()}\nPłyt: ${state.separations.length}\nRastr: ${withHalftone ? 'tak' : 'nie'}`);
+        } catch (e) {
+            showError('Błąd eksportu: ' + e.message);
+        } finally {
+            hideLoading();
         }
-        
-        function closeExportModal() {
-            document.getElementById('exportModal').classList.remove('active');
-        }
-        
-        function selectExportFormat(format) {
-            state.exportFormat = format;
-            document.querySelectorAll('.modal-option').forEach(opt => {
-                opt.classList.toggle('selected', opt.onclick.toString().includes(format));
-            });
-        }
-        
-        function confirmExport() {
-            // Symulacja eksportu
-            showLoading('Eksportowanie separacji...');
-            
-            setTimeout(() => {
-                hideLoading();
-                closeExportModal();
-                alert(`Eksport zakończony!\nFormat: ${state.exportFormat.toUpperCase()}\nSeparacji: ${state.separations.length}`);
-            }, 1500);
-        }
-        
-        // Pomocnicze funkcje UI
-        function showLoading(text) {
-            document.getElementById('loadingText').textContent = text;
-            document.getElementById('loadingOverlay').classList.add('active');
-        }
-        
-        function hideLoading() {
-            document.getElementById('loadingOverlay').classList.remove('active');
-        }
-        
-        function showEmptyState(show) {
-            document.getElementById('emptyState').style.display = show ? 'block' : 'none';
-        }
-        
-        function showError(message) {
-            alert(message);
-        }
-        
-        // Inicjalizacja
-        updateStats();
+    }
+
+    // ----------------------------------------------------------------------
+    //  Pomocnicze UI
+    // ----------------------------------------------------------------------
+    function showLoading(t){ document.getElementById('loadingText').textContent = t; document.getElementById('loadingOverlay').classList.add('active'); }
+    function hideLoading(){ document.getElementById('loadingOverlay').classList.remove('active'); }
+    function showEmptyState(s){ document.getElementById('emptyState').style.display = s ? 'block' : 'none'; }
+    function showError(m){ alert(m); }
+
+    // ----------------------------------------------------------------------
+    //  Init
+    // ----------------------------------------------------------------------
+    checkServer();
+    setInterval(() => { if (!state.serverOnline) checkServer(); }, 5000);
+    updateStats();
     </script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a05523aafc832a51',t:'MTc4MDM4OTQ4MA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
