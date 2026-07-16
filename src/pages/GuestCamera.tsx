@@ -126,7 +126,7 @@ export function GuestCamera() {
     return (
       <div className="min-h-dvh bg-canvas flex flex-col items-center justify-center p-8 text-center">
         <div className="w-20 h-20 rounded-full bg-success-100 flex items-center justify-center mb-6">
-          <Check className="w-10 h-10 text-success-600" />
+          <Check className="w-10 h-10 text-success-600" aria-hidden="true" />
         </div>
         <h2 className="text-3xl font-light text-ink-900 mb-2">Dziękujemy!</h2>
         <p className="text-ink-700 text-sm mb-10">Plik trafił do albumu</p>
@@ -153,7 +153,7 @@ export function GuestCamera() {
       {state === 'idle' && (
         <label htmlFor="camera-input" className="cursor-pointer flex flex-col items-center gap-5 select-none">
           <div className="w-28 h-28 rounded-full bg-accent-600 flex items-center justify-center shadow-2xl active:scale-95 transition-transform duration-150">
-            <Camera className="w-12 h-12 text-white" />
+            <Camera className="w-12 h-12 text-white" aria-hidden="true" />
           </div>
           <span className="text-ink-700 text-sm tracking-wide">Dotknij, aby dodać zdjęcie lub film</span>
           <input
@@ -180,8 +180,8 @@ export function GuestCamera() {
       )}
 
       {state === 'converting' && (
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-2 border-accent-600 border-t-transparent rounded-full animate-spin" />
+        <div className="flex flex-col items-center gap-4" role="status" aria-live="polite">
+          <div className="w-12 h-12 border-2 border-accent-600 border-t-transparent rounded-full animate-spin" aria-hidden="true" />
           <p className="text-ink-700 text-sm">Przetwarzanie zdjęcia...</p>
         </div>
       )}
@@ -196,7 +196,7 @@ export function GuestCamera() {
             />
           ) : previewFailed ? (
             <div className="w-full rounded-2xl bg-ink-300/40 flex flex-col items-center justify-center gap-2 py-16 px-4 text-center">
-              <Camera className="w-8 h-8 text-ink-500" />
+              <Camera className="w-8 h-8 text-ink-500" aria-hidden="true" />
               <p className="text-ink-700 text-sm">
                 Podgląd niedostępny dla tego formatu — plik i tak zostanie wysłany.
               </p>
@@ -211,13 +211,13 @@ export function GuestCamera() {
           )}
 
           {validationError ? (
-            <div className="flex flex-col gap-3 text-center">
+            <div className="flex flex-col gap-3 text-center" role="alert" aria-live="polite">
               <p className="text-error-600 text-sm">{validationError}</p>
               <button
                 onClick={reset}
                 className="w-full py-3 border border-ink-300 text-ink-900 rounded-full text-sm flex items-center justify-center gap-2"
               >
-                <RotateCcw className="w-4 h-4" />
+                <RotateCcw className="w-4 h-4" aria-hidden="true" />
                 Wybierz inny plik
               </button>
             </div>
@@ -225,7 +225,7 @@ export function GuestCamera() {
             <div className="flex flex-col gap-4">
               <p className="text-ink-700 text-sm text-center">Załadowano — możesz wysłać</p>
 
-              <label className="flex items-center justify-between gap-3">
+              <div className="flex items-center justify-between gap-3">
                 <span className="text-sm text-ink-700">Wyślij anonimowo</span>
                 <button
                   type="button"
@@ -233,27 +233,38 @@ export function GuestCamera() {
                   aria-checked={anonymous}
                   aria-label="Wyślij anonimowo"
                   onClick={() => setAnonymous(v => !v)}
-                  className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${
-                    anonymous ? 'bg-accent-600' : 'bg-ink-300'
-                  }`}
+                  className="relative w-11 h-11 shrink-0 flex items-center justify-center"
                 >
                   <span
-                    className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform ${
-                      anonymous ? 'translate-x-5' : 'translate-x-0'
+                    aria-hidden="true"
+                    className={`relative w-11 h-6 rounded-full transition-colors ${
+                      anonymous ? 'bg-accent-600' : 'bg-ink-300'
                     }`}
-                  />
+                  >
+                    <span
+                      className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform ${
+                        anonymous ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </span>
                 </button>
-              </label>
+              </div>
 
               {!anonymous && (
-                <input
-                  type="text"
-                  value={author}
-                  onChange={e => setAuthor(e.target.value)}
-                  placeholder="Twoje imię (opcjonalnie)"
-                  maxLength={40}
-                  className="w-full py-3 px-4 rounded-xl border border-ink-300 text-sm text-ink-900 placeholder:text-ink-500 focus:outline-none focus:border-accent-600 focus:ring-2 focus:ring-accent-100"
-                />
+                <div>
+                  <label htmlFor="author-input" className="sr-only">
+                    Twoje imię (opcjonalnie)
+                  </label>
+                  <input
+                    id="author-input"
+                    type="text"
+                    value={author}
+                    onChange={e => setAuthor(e.target.value)}
+                    placeholder="Twoje imię (opcjonalnie)"
+                    maxLength={40}
+                    className="w-full py-3 px-4 rounded-xl border border-ink-300 text-sm text-ink-900 placeholder:text-ink-500 focus:outline-none focus:border-accent-600 focus:ring-2 focus:ring-accent-100"
+                  />
+                </div>
               )}
 
               <div className="flex gap-3">
@@ -261,7 +272,7 @@ export function GuestCamera() {
                   onClick={reset}
                   className="flex-1 py-3 border border-ink-300 text-ink-900 rounded-full text-sm flex items-center justify-center gap-2"
                 >
-                  <RotateCcw className="w-4 h-4" />
+                  <RotateCcw className="w-4 h-4" aria-hidden="true" />
                   Zmień
                 </button>
                 <button
@@ -277,14 +288,14 @@ export function GuestCamera() {
       )}
 
       {state === 'uploading' && (
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-2 border-accent-600 border-t-transparent rounded-full animate-spin" />
+        <div className="flex flex-col items-center gap-4" role="status" aria-live="polite">
+          <div className="w-12 h-12 border-2 border-accent-600 border-t-transparent rounded-full animate-spin" aria-hidden="true" />
           <p className="text-ink-700 text-sm">Wysyłam...</p>
         </div>
       )}
 
       {state === 'error' && errorKind === 'network' && (
-        <div className="flex flex-col items-center gap-4 text-center max-w-xs">
+        <div className="flex flex-col items-center gap-4 text-center max-w-xs" role="alert" aria-live="polite">
           <p className="text-error-600 text-sm">Brak połączenia z internetem. Sprawdź sieć i spróbuj ponownie.</p>
           <button
             onClick={handleUpload}
@@ -296,7 +307,7 @@ export function GuestCamera() {
       )}
 
       {state === 'error' && errorKind === 'storage-full' && (
-        <div className="flex flex-col items-center gap-4 text-center max-w-xs">
+        <div className="flex flex-col items-center gap-4 text-center max-w-xs" role="alert" aria-live="polite">
           <p className="text-error-600 text-sm">
             Brak miejsca na przechowywanie plików. Poinformuj organizatora — na razie nie da się wysłać nowych zdjęć ani filmów.
           </p>
@@ -310,7 +321,7 @@ export function GuestCamera() {
       )}
 
       {state === 'error' && errorKind === 'generic' && (
-        <div className="flex flex-col items-center gap-4 text-center">
+        <div className="flex flex-col items-center gap-4 text-center" role="alert" aria-live="polite">
           <p className="text-error-600 text-sm">Coś poszło nie tak. Spróbuj ponownie.</p>
           <button
             onClick={reset}

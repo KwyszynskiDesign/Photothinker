@@ -25,18 +25,33 @@ ZAKAZANE ciemny brąz+złoto jako kolory bazowe, emojiserca (♥) w UI i copy, g
 
 Tokeny żyją w `srcindex.css` jako `@theme` (patrz `docsdecisions.md` za pełną listę wartości). Nowe tokeny lub zmiany kolorów wymagają potwierdzenia przed wdrożeniem — nie dryfować z powrotem w stronę starego stylu.
 
-## Scope boundaries (MVP) — NIE dodawać bez wyraźnej decyzji
-- brak multi-eventmulti-tenant
+## Domyślne ustawienia MVP — zmiana wymaga wpisu w docs/decisions.md
+Poniższe to punkt wyjścia dla MVP, nie sztywne, trwałe zakazy. Odejście od
+dowolnego punktu jest dozwolone, ale musi najpierw dostać wpis w
+`docs/decisions.md` (co się zmienia i dlaczego) — dopiero potem wolno to
+zaimplementować. Bez takiego wpisu, poniższe obowiązuje.
+
+- brak multi-event/multi-tenant
 - brak tworzenia eventu przez UI
 - brak Google Drive
 - brak batch upload
-- brak edycji zdjęćwideo
-- brak moderacji plików
+- brak edycji zdjęć/wideo
+- brak moderacji treści przed publikacją (patrz niżej: to nie to samo co kuratorstwo)
+- kuratorstwo galerii przez admina (usuwanie opublikowanych plików) — w scope, patrz docs/decisions.md
 - brak dark mode
 - brak wieloosobowych ról organizatora
-- brak eksportówraportów
+- brak raportów (statystyki liczby/wagi plików w panelu admina to wygoda UI, nie raport)
+- eksport ZIP wszystkich plików (organizator) — w scope, patrz docs/decisions.md
 - brak generatora QR w apce (link statyczny, QR generowany zewnętrznie przez organizatora)
 - brak płatności, brak AI retuszu
+
+### Moderacja vs kuratorstwo galerii
+- **Moderacja** = filtrowanie/blokowanie treści PRZED publikacją (np. kolejka
+  akceptacji zanim zdjęcie trafi do albumu, automatyczna cenzura). Nadal poza
+  scope — nie budować.
+- **Kuratorstwo galerii** = usuwanie PO fakcie, przez zalogowanego admina,
+  jego własna decyzja co zostaje w albumie. W scope od teraz — patrz
+  `docs/decisions.md`.
 
 ## Media rules
 - Dozwolone JPEG, PNG, HEIC (konwertowane do JPEG client-side), MP4, MOV (bez konwersji)
