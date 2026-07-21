@@ -5,7 +5,8 @@ service cloud.firestore {
       allow create: if request.resource.data.keys().hasAll(['url', 'storagePath', 'uploadedAt'])
                     && request.resource.data.uploadedAt is int
                     && request.resource.data.url is string;
-      allow read, update, delete: if request.auth != null;
+      // Musi być zsynchronizowane z VITE_ADMIN_EMAIL w .env przy zmianie organizatora.
+      allow read, update, delete: if request.auth != null && request.auth.token.email == 'karol2609@gmail.com';
     }
   }
 }

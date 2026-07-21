@@ -9,6 +9,7 @@ import { useAuth } from '../hooks/useAuth';
 import { usePhotos, type Photo } from '../hooks/usePhotos';
 
 const ZIP_SIZE_WARNING_BYTES = 1.5 * 1024 * 1024 * 1024;
+const ADMIN_EMAIL = import.meta.env.VITE_ADMIN_EMAIL;
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -16,15 +17,19 @@ function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function AdminLogin() {
+function AdminLogin({ unauthorized }: { unauthorized?: boolean }) {
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(unauthorized ? 'To konto nie ma dostępu do panelu.' : '');
 
   async function handleLogin() {
     setLoading(true);
     setError('');
     try {
-      await signInWithPopup(auth, new GoogleAuthProvider());
+      const result = await signInWithPopup(auth, new GoogleAuthProvider());
+      if (result.user.email !== ADMIN_EMAIL) {
+        await signOut(auth);
+        setError('To konto nie ma dostępu do panelu.');
+      }
     } catch (err: unknown) {
       const code = (err as { code?: string }).code ?? 'unknown';
       setError(`Błąd: ${code}`);
@@ -501,6 +506,11 @@ function AdminGallery() {
 
 export function AdminPage() {
   const { user, loading } = useAuth();
+  const unauthorized = !!user && user.email !== ADMIN_EMAIL;
+
+  useEffect(() => {
+    if (unauthorized) signOut(auth);
+  }, [unauthorized]);
 
   if (loading) {
     return (
@@ -509,6 +519,8 @@ export function AdminPage() {
       </div>
     );
   }
+
+  if (unauthorized) return <AdminLogin unauthorized />;
 
   return user ? <AdminGallery /> : <AdminLogin />;
 }

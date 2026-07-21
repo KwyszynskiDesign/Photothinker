@@ -5,7 +5,8 @@ service firebase.storage {
       allow write: if (request.resource.contentType.matches('image/.*') && request.resource.size < 25 * 1024 * 1024)
                    || (request.resource.contentType.matches('video/.*') && request.resource.size < 200 * 1024 * 1024);
       allow read: if true;
-      allow delete: if request.auth != null;
+      // Musi być zsynchronizowane z VITE_ADMIN_EMAIL w .env przy zmianie organizatora.
+      allow delete: if request.auth != null && request.auth.token.email == 'karol2609@gmail.com';
     }
   }
 }
