@@ -1,11 +1,21 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
+    // Pliki sprzed pivotu na multi-event — zostają pod starym prefiksem, nie są przenoszone.
     match /photos/{fileName} {
       allow write: if (request.resource.contentType.matches('image/.*') && request.resource.size < 25 * 1024 * 1024)
                    || (request.resource.contentType.matches('video/.*') && request.resource.size < 200 * 1024 * 1024);
       allow read: if true;
-      // Musi być zsynchronizowane z VITE_ADMIN_EMAIL w .env przy zmianie organizatora.
+      // Musi być zsynchronizowane z VITE_ADMIN_EMAIL w .env przy zmianie admina.
+      allow delete: if request.auth != null && request.auth.token.email == 'karol2609@gmail.com';
+    }
+
+    // Pliki nowych wydarzeń — prefiks ścieżki zamiast prawdziwych folderów.
+    match /events/{eventSlug}/{fileName} {
+      allow write: if (request.resource.contentType.matches('image/.*') && request.resource.size < 25 * 1024 * 1024)
+                   || (request.resource.contentType.matches('video/.*') && request.resource.size < 200 * 1024 * 1024);
+      allow read: if true;
+      // Musi być zsynchronizowane z VITE_ADMIN_EMAIL w .env przy zmianie admina.
       allow delete: if request.auth != null && request.auth.token.email == 'karol2609@gmail.com';
     }
   }

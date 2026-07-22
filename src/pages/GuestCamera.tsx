@@ -1,16 +1,15 @@
 import { useState } from 'react';
+import { useParams } from 'react-router-dom';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { collection, addDoc } from 'firebase/firestore';
-import { Camera, Check, RotateCcw } from 'lucide-react';
+import { Camera, Check, RefreshCw, RotateCcw } from 'lucide-react';
 import heic2any from 'heic2any';
 import { storage, db } from '../lib/firebase';
 import { compressImage } from '../utils/compressImage';
+import { useEvent } from '../hooks/useEvents';
 
 type UploadState = 'idle' | 'converting' | 'preview' | 'uploading' | 'success' | 'error';
 type ErrorKind = 'network' | 'storage-full' | 'generic';
-
-const EVENT_NAME = import.meta.env.VITE_EVENT_NAME || 'Wedding Photos';
-const EVENT_DATE = import.meta.env.VITE_EVENT_DATE || '';
 
 const MAX_IMAGE_SIZE = 25 * 1024 * 1024;
 const MAX_VIDEO_SIZE = 200 * 1024 * 1024;
@@ -27,6 +26,40 @@ async function convertHeicToJpeg(f: File): Promise<File> {
 }
 
 export function GuestCamera() {
+  const { slug } = useParams<{ slug: string }>();
+  const event = useEvent(slug);
+
+  if (event === undefined) {
+    return (
+      <div className="min-h-dvh bg-canvas flex items-center justify-center" role="status" aria-label="Ładowanie">
+        <RefreshCw className="w-6 h-6 text-ink-300 animate-spin" aria-hidden="true" />
+      </div>
+    );
+  }
+
+  if (event === null) {
+    return (
+      <div className="min-h-dvh bg-canvas flex flex-col items-center justify-center p-8 text-center gap-2">
+        <p className="text-ink-900 text-lg font-medium">Nie znaleziono wydarzenia</p>
+        <p className="text-ink-500 text-sm">Sprawdź link od organizatora — mógł się zmienić.</p>
+      </div>
+    );
+  }
+
+  return <UploadFlow eventId={event.id} eventName={event.name} eventDate={event.eventDate} storagePrefix={event.storagePrefix} />;
+}
+
+function UploadFlow({
+  eventId,
+  eventName,
+  eventDate,
+  storagePrefix,
+}: {
+  eventId: string;
+  eventName: string;
+  eventDate: string | null;
+  storagePrefix: string;
+}) {
   const [state, setState] = useState<UploadState>('idle');
   const [preview, setPreview] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -84,7 +117,7 @@ export function GuestCamera() {
           ? file.name.split('.').pop()?.toLowerCase() || 'heic'
           : 'jpg';
       const contentType = isVideo ? file.type : stillHeic ? file.type || 'image/heic' : 'image/jpeg';
-      const path = `photos/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+      const path = `${storagePrefix}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
       const storageRef = ref(storage, path);
       await uploadBytes(storageRef, blob, { contentType });
       const url = await getDownloadURL(storageRef);
@@ -95,6 +128,7 @@ export function GuestCamera() {
         author: anonymous ? null : author.trim() || null,
         size: blob.size,
         uploadedAt: Date.now(),
+        eventId,
       });
       if (preview) URL.revokeObjectURL(preview);
       setPreview(null);
@@ -143,10 +177,10 @@ export function GuestCamera() {
   return (
     <div className="min-h-dvh bg-canvas flex flex-col items-center justify-center p-6">
       <div className="text-center mb-12">
-        {EVENT_DATE && (
-          <p className="text-accent-600 text-xs tracking-widest uppercase mb-2">{EVENT_DATE}</p>
+        {eventDate && (
+          <p className="text-accent-600 text-xs tracking-widest uppercase mb-2">{eventDate}</p>
         )}
-        <h1 className="text-ink-900 text-4xl font-light tracking-wide">{EVENT_NAME}</h1>
+        <h1 className="text-ink-900 text-4xl font-light tracking-wide">{eventName}</h1>
         <div className="w-10 h-px bg-accent-600 mx-auto mt-4" />
       </div>
 

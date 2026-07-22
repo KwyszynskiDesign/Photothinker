@@ -10,10 +10,13 @@ Aplikacja do zbierania zdjęćwideo od gości weselnych na żywo, z panelem orga
 - react-router-dom (już w repo)
 - lucide-react (ikony)
 
-## Architektura — single-event
-- Jeden event na deployment, konfigurowany przez zmienne `.env` (`VITE_EVENT_NAME`, `VITE_EVENT_DATE`).
-- Brak multi-tenant, brak listy eventów, brak tworzenia eventu przez UI.
-- Jeśli trzeba zmienić dane eventu edytuj `.env` i redeploy. Nie budować UI ustawień.
+## Architektura — multi-event (jeden admin)
+- Wiele wydarzeń w jednym deploymencie. Admin tworzy wydarzenie przez UI w `/admin` (przycisk "Stwórz wydarzenie").
+- Każde wydarzenie to dokument `events/{slug}` w Firestore (`id, name, slug, eventDate, createdAt, guestUrl, storagePrefix, archived`). Zdjęcia/wideo w `photos` mają pole `eventId` (== slug).
+- Storage bez prawdziwych folderów — tylko prefiksy ścieżek `events/{slug}/...`. Stare pliki z pilota zostają pod `photos/...`.
+- To **nie jest** multi-tenant SaaS: jeden admin/właściciel systemu (allowlist e-maila, `VITE_ADMIN_EMAIL`), bez wielu organizacji, workspace'ów ani ról organizatora — patrz "brak wieloosobowych ról organizatora" niżej, to nadal obowiązuje.
+- `/` przekierowuje tymczasowo na wydarzenie-legacy z pilota, żeby stare linki/QR dalej działały.
+- Pełne uzasadnienie pivotu: `docs/decisions.md`.
 
 ## Storage — Firebase, nie Google Drive
 Wszystkie pliki gości trafiają do Firebase Storage, metadane (autor, typ, data, waga) do Firestore. Nie integrować Google Drive API.
@@ -31,8 +34,8 @@ dowolnego punktu jest dozwolone, ale musi najpierw dostać wpis w
 `docs/decisions.md` (co się zmienia i dlaczego) — dopiero potem wolno to
 zaimplementować. Bez takiego wpisu, poniższe obowiązuje.
 
-- brak multi-event/multi-tenant
-- brak tworzenia eventu przez UI
+- multi-event: w scope, patrz docs/decisions.md — admin tworzy wydarzenia przez UI
+- brak multi-tenant / wielu adminów / ról organizatora / organizacji / workspace'ów — nadal poza scope, mimo multi-event
 - brak Google Drive
 - brak batch upload
 - brak edycji zdjęć/wideo
@@ -42,7 +45,7 @@ zaimplementować. Bez takiego wpisu, poniższe obowiązuje.
 - brak wieloosobowych ról organizatora
 - brak raportów (statystyki liczby/wagi plików w panelu admina to wygoda UI, nie raport)
 - eksport ZIP wszystkich plików (organizator) — w scope, patrz docs/decisions.md
-- brak generatora QR w apce (link statyczny, QR generowany zewnętrznie przez organizatora)
+- generator QR w apce (PNG/PDF, per wydarzenie) — w scope, patrz docs/decisions.md; odwraca wcześniejszy zapis "QR generowany zewnętrznie"
 - brak płatności, brak AI retuszu
 
 ### Moderacja vs kuratorstwo galerii

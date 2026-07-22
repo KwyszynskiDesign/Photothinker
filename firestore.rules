@@ -1,10 +1,19 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    match /events/{eventId} {
+      // Publiczny odczyt: gość musi rozwiązać slug w URL zanim wyśle zdjęcie.
+      allow read: if true;
+      // Musi być zsynchronizowane z VITE_ADMIN_EMAIL w .env przy zmianie admina.
+      allow create, update, delete: if request.auth != null && request.auth.token.email == 'karol2609@gmail.com';
+    }
+
     match /photos/{photoId} {
-      allow create: if request.resource.data.keys().hasAll(['url', 'storagePath', 'uploadedAt'])
+      allow create: if request.resource.data.keys().hasAll(['url', 'storagePath', 'uploadedAt', 'eventId'])
                     && request.resource.data.uploadedAt is int
-                    && request.resource.data.url is string;
+                    && request.resource.data.url is string
+                    && request.resource.data.eventId is string
+                    && request.resource.data.eventId.size() > 0;
       // Musi być zsynchronizowane z VITE_ADMIN_EMAIL w .env przy zmianie organizatora.
       allow read, update, delete: if request.auth != null && request.auth.token.email == 'karol2609@gmail.com';
     }
