@@ -1,27 +1,79 @@
 # Decision log — Photothinker MVP
 
-| Decyzja | Rozstrzygnięcie | Uzasadnienie |
-|---|---|---|
-| Storage backend | Firebase Storage + Firestore | Zgodnie z już działającym scaffoldem, nie Google Drive z oryginalnego briefu. |
-| Multi-event vs single-event | Single-event, `.env` | Brak potrzeby multi-tenant na MVP. Brak listy/tworzenia/ustawień eventu w UI. |
-| Wsparcie wideo | Dodane | Brief wprost wymagał "zdjęcie lub film" — nie było częścią decyzji o zawężeniu scope'u. |
-| Styl wizualny | Restyle na Editorial Warmth | Obecny brąz/złoto/serca łamie explicit "nie chcę kiczu weselnego" z briefu. |
-| Dystrybucja linku/QR | Poza apką | URL deploymentu statyczny, organizator generuje QR zewnętrznym narzędziem. |
-| Lightbox pliku (organizator) | MVP-lite | Preview + metadata (autor, data, waga) + close. Bez akcji destrukcyjnych, bez next/prev. |
-| Kompresja client-side | Zdjęcia i wideo | Fallback na oryginał jeśli kompresja wideo zawiedzie na słabszym urządzeniu. |
-| Consent scope | Minimalny | Mikrotekst pod CTA, upload = domyślna zgoda, bez checkboxa. |
-| Limity plików | 25 MB foto / 200 MB wideo | Do zweryfikowania względem realnego planu Firebase (Spark/Blaze). |
-| HEIC/MOV | HEIC→JPEG client-side, MOV bez konwersji | — |
-| Event lifecycle | Brak maszyny stanów | Bez UI zarządzania eventem — event "żyje" tak długo jak apka jest zdeployowana. |
-| Google Drive jako storage / multi-tenant / płatności | Odroczone do v2 | Rozważane jako pivot (własny Drive właściciela, dokupowanie GB, kampania/portfolio), ale wymagałoby backendu (Cloud Function proxy do Drive) i przekreśla single-event MVP. Pilot na jednym weselu zostaje na obecnym Firebase; decyzja o Drive/multi-tenant/płatnościach po zebraniu realnych danych zużycia GB i feedbacku z pilota. |
-| Odświeżanie galerii admina | Automatyczne (real-time), bez przycisku | Galeria w `AdminPage.tsx` odświeża się przez `onSnapshot` w `usePhotos.ts` — nowe zdjęcia pojawiają się bez akcji użytkownika. `RefreshCw` (lucide-react) występuje w kodzie wyłącznie jako dekoracyjny spinner ładowania (logowanie, ładowanie zdjęć, ładowanie stanu auth) — nie jest klikalnym przyciskiem i nie ma `aria-label` typu "Odśwież galerię", bo ogłaszałoby nieistniejącą akcję screen readerowi. Manualny przycisk odświeżania (np. na wypadek problemów z real-time sync) to nowa funkcja produktowa wymagająca osobnej decyzji, nie poprawka accessibility. |
-| Eksport ZIP wszystkich plików (organizator) | W scope, wbrew pierwotnej granicy MVP | Odwraca wcześniejszy zapis "brak eksportów/raportów" — organizator chce pojedynczy plik ze wszystkimi zdjęciami/filmami z wesela do archiwizacji, zamiast pobierania kafelek po kafelku. Świadoma decyzja. Filtr/sortowanie/statystyki w galerii admina traktowane jako wygoda UI, nie jako "raport" — nie wymagały osobnej decyzji. |
-| Kuratorstwo galerii (usuwanie plików przez admina) | W scope, wbrew pierwotnej granicy MVP | Odwraca wcześniejszy zapis "brak moderacji plików" — ale to nie jest moderacja (filtrowanie/blokowanie PRZED publikacją, dalej poza scope), tylko kuratorstwo PO fakcie: zalogowany admin może usunąć opublikowane zdjęcie/wideo, którego nie chce w albumie. X na kafelku w siatce (nie w lightboksie — tam zostaje MVP-lite bez akcji destrukcyjnych), z potwierdzeniem `confirm()` przed usunięciem. Usuwa dokument z Firestore ORAZ plik z Firebase Storage, żeby nie zostawiać martwych plików zajmujących miejsce. Wymaga reguły `allow delete` w `storage.rules` dla zalogowanego admina (Firestore już na to pozwalał). |
-| Allowlist e-maila admina | Dodane przed pierwszym deployem produkcyjnym | Reguły `request.auth != null` w `firestore.rules`/`storage.rules` pozwalały każdemu kontu Google zalogować się do `/admin` i usuwać pliki gości — luka wykryta przy przygotowaniu pierwszego deployu. Naprawa: `request.auth.token.email == '<email>'` w regułach (rzeczywista ochrona) + sprawdzenie `user.email` w `AdminPage.tsx` z wylogowaniem nieautoryzowanego konta (UX). E-mail skonfigurowany przez `VITE_ADMIN_EMAIL` w `.env` po stronie klienta, ale zahardkodowany osobno w regułach (Firebase Rules nie czyta `.env`) — oba miejsca trzeba synchronizować ręcznie przy zmianie organizatora/redeployu na nowe wesele. Zgodnie z "brak wieloosobowych ról organizatora": pojedynczy e-mail, nie lista. |
-| Pivot na multi-event (jeden admin, wiele wydarzeń) | Wdrożone — odwraca "brak multi-event", "brak tworzenia eventu przez UI", "brak listy eventów" | Świadomy pivot produktu: z modelu "jeden event na deployment" (`.env`) na "wiele wydarzeń pod jednym adminem". To **nie jest** multi-tenant SaaS — nadal jeden admin (ta sama allowlist e-maila z `VITE_ADMIN_EMAIL`), bez wielu organizacji/workspace'ów/ról organizatora; multi-tenant/wielu adminów pozostaje odroczone do v2, zgodnie z wcześniejszym wpisem o Google Drive/multi-tenant/płatnościach. Model danych: kolekcja `events/{slug}` (slug jako ID dokumentu — atomowa unikalność, tani lookup gościa przez `getDoc`) z polami `id, name, slug, eventDate, createdAt, guestUrl, storagePrefix, archived`. `eventDate` dodane do modelu mimo że nie było w pierwotnej specyfikacji zadania — bez niego zniknąłby istniejący UX daty pod nazwą wydarzenia w `GuestCamera`. Dokumenty `photos` dostają nowe pole `eventId` (== slug wydarzenia). Storage bez prawdziwych folderów — wyłącznie prefiksy ścieżek `events/{slug}/...`; pliki z pilota zostają pod `photos/...` bez przenoszenia (przenoszenie obiektów binarnych uznane za zbędne ryzyko). `/` przekierowuje na wydarzenie-legacy `ania-marek` (zrekonstruowane z `VITE_EVENT_NAME`/`VITE_EVENT_DATE`), żeby już rozdane linki/QR z pilota dalej działały — jeden kod ścieżki (redirect), nie dwie równoległe implementacje. Backfill pola `eventId` na istniejących dokumentach `photos` to świadomy, ręcznie uruchamiany krok migracyjny z panelu admina (tymczasowy ekran/akcja, nie dzieje się automatycznie przy wejściu do `/admin`) — galeria admina przełącza się na zapytanie filtrowane po `eventId` dopiero po potwierdzonym wykonaniu backfillu. Zapytanie `where('eventId','==',slug)` celowo bez `orderBy` po stronie Firestore (sortowanie i tak już dziś dzieje się w pamięci w `AdminGallery`) — unika potrzeby indeksu złożonego i ryzyka "zapytanie nie działa dopóki indeks się nie zbuduje". QR: nowe zależności `qrcode` (generowanie) i `jspdf` (eksport PDF); eksport PNG + PDF, bez JPG. Odwraca też osobny wcześniejszy zapis "brak generatora QR w apce, QR generowany zewnętrznie" — generowanie QR jest teraz akcją kontekstową per wydarzenie (nie globalną), dostępną z listy wydarzeń i z widoku pojedynczego wydarzenia. |
+## Cel dokumentu
 
-| Plansza do druku A4/A5 (QR) | W scope | Rozszerzenie istniejącego eksportu QR (nie nowy równoległy mechanizm) — modal "Generuj QR" dostaje trzy akcje: PNG (surowy kod, użytek cyfrowy), Plansza A4, Plansza A5 (nazwa wydarzenia + tekst dla gości + duży QR + link tekstowy, gotowe do druku). Świadomie **usunięto** dotychczasowy osobny przycisk "PDF" (goły QR na A4 bez tekstu/linku) — "Plansza A4" jest jego strict ulepszoną wersją, trzymanie obu osobno tylko duplikowałoby niemal identyczny eksport. Generowanie PDF nadal przez `jsPDF` (już w zależnościach), zapis pliku nadal przez `saveGeneratedFile` (Web Share API + fallback iOS Safari, bez zmian w tej warstwie). |
-| Pasek "Dostępne miejsce" (panel admina) | W scope, wariant B | Widoczny tylko w `/admin` (lista wydarzeń), nigdy dla gościa. Realne całkowite zużycie/limit Firebase Storage **nie jest dostępne z poziomu klienta JS SDK** bez backendu (Cloud Function + Admin SDK lub Cloud Monitoring API) — architektura apki (SPA + Firestore/Storage rules, bez serwera) tego nie obsługuje, więc wariant "pełny realny usage + oficjalny limit" świadomie odrzucony. Zamiast tego: zużycie liczone jako suma pola `Photo.size` (bajty, zapisywane już dziś przy każdym uploadzie) po **wszystkich** dokumentach `photos`, niezależnie od wydarzenia — dokładne dla plików wgranych przez apkę, ale nie jest oficjalnym licznikiem Firebase, co UI musi jawnie komunikować (mikrotekst przy pasku), żeby nie wprowadzać admina w błąd. Limit odniesienia to nowa zmienna `VITE_STORAGE_LIMIT_GB=5` w `.env` (plan Firebase Spark, potwierdzone przez użytkownika) — wartość ustawiona ręcznie, nie odczytana automatycznie. Kolory progu (bezpiecznie/ostrzeżenie/mało miejsca) z istniejących tokenów `success/warning/error`, zero nowych kolorów. Świadome ograniczenie: pasek jest czysto informacyjny, nie blokuje uploadu po przekroczeniu limitu; pobiera całą kolekcję `photos` bez paginacji, co przy dużym wzroście liczby wydarzeń przestanie skalować się bez dalszej pracy. Wyświetlanie zużycia przełącza się z GB na MB poniżej 100 MB (`formatUsage` w `StorageBar.tsx`) — bez tego małe, ale realne zużycie (np. kilka testowych plików) zaokrąglało się do mylącego "0.0 GB" i sprawiało wrażenie, że pasek nie widzi istniejących plików, choć liczył poprawnie. Wykryte i naprawione przy pierwszym smoke teście po deployu. |
-| Brak polskich znaków w planszy PDF (`ą ć ę ł ń ó ś ź ż`) | Znane ograniczenie, świadomie odłożone | Domyślne czcionki `jsPDF` (Helvetica/Times/Courier) używają `WinAnsiEncoding`, które nie zawiera polskich znaków diakrytycznych — dotyczy tekstu pomocniczego ("Zeskanuj kod i dodaj zdjęcia") i nazw wydarzeń z polskimi znakami. Potwierdzone przy smoke teście po deployu, celowo nienaprawione teraz ("na początek wystarczy") — pierwsza wersja plansz uznana za wystarczającą. Planowana naprawa bez nowych zależności: renderować tekst planszy na `<canvas>` (przeglądarka poprawnie rysuje polskie znaki dowolną czcionką systemową) i wkleić jako obraz do PDF przez `addImage`, zamiast osadzać plik czcionki. Nie blokuje DoD tej funkcji. |
+- Ten dokument łączy wcześniejsze decyzje, które nadal obowiązują, z najnowszymi decyzjami ownera.
+- Decyzje historyczne, które zostały później odwrócone, nie są tu traktowane jako aktywny stan produktu.
+- Celem jest jedno źródło prawdy dla scope’u, dostępu, UX, rollout’u i infrastruktury.
 
-Pełne uzasadnienia i kontekst: `docs/mvp-plan.md`.
+## 1. Model produktu
+
+- Aplikacja działa w modelu multi-event: wiele wydarzeń pod jedną aplikacją.
+- Główny backend pozostaje oparty o Firebase Storage + Firestore.
+- Google Drive wchodzi teraz jako osobny eksperyment techniczny.
+- Eksperyment z Google Drive nie oznacza jeszcze pełnej migracji architektury ani porzucenia Firebase.
+- Produkt nie wchodzi jeszcze w pełny multi-tenant, wiele niezależnych workspace’ów ani pełny model wielu organizatorów.
+- Event nadal nie ma rozbudowanej maszyny stanów; nie budujemy osobnego lifecycle management UI.
+
+## 2. Zakres funkcjonalny
+
+- Upload zdjęć zostaje w zakresie.
+- Upload wideo zostaje w zakresie.
+- Kompresja client-side zostaje dla zdjęć i wideo, z fallbackiem na oryginał, jeśli kompresja wideo zawiedzie.
+- HEIC jest konwertowany client-side do JPEG.
+- MOV pozostaje bez konwersji.
+- Lightbox organizatora zostaje w wariancie MVP-lite: podgląd, podstawowe metadane i zamknięcie, bez akcji destrukcyjnych i bez next/prev.
+- Admin ma możliwość pobrania ZIP-a ze wszystkimi plikami wydarzenia.
+- Admin może usuwać pliki z galerii wydarzenia.
+- Galeria admina odświeża się automatycznie w czasie rzeczywistym; nie dodajemy osobnego przycisku ręcznego odświeżania.
+- QR w aplikacji zostaje w zakresie.
+- Plansze A4 i A5 do druku zostają w zakresie.
+- Pasek dostępnego miejsca zostaje w zakresie jako funkcja informacyjna dla admina.
+- Pasek quota nie blokuje uploadu.
+- Licznik zdjęć i filmów per event wchodzi do bieżącego scope’u.
+- Consent zostaje w wariancie minimalnym: mikrotekst przy CTA, bez checkboxa.
+- Limity plików pozostają ustawione na 25 MB dla zdjęć i 200 MB dla wideo, z zastrzeżeniem dalszej weryfikacji względem planu.
+- Styl wizualny pozostaje w kierunku Editorial Warmth.
+
+## 3. Dostęp i bezpieczeństwo
+
+- Dotychczasowy model jednego allowlist e-maila był poprawnym zabezpieczeniem wcześniejszego etapu i pozostaje ważnym punktem wyjścia.
+- Na obecnym etapie chcemy rozszerzyć ten model o możliwość rejestracji i testowego dopuszczenia przynajmniej jednej dodatkowej osoby.
+- Ten krok służy walidacji flow konta i dostępu, a nie wdrożeniu pełnego systemu ról i organizacji.
+- Nadal nie wdrażamy jeszcze pełnego systemu ról, wielu niezależnych organizatorów ani workspace’ów.
+
+## 4. Rollout i jakość
+
+- Backfill historycznych zdjęć jest potrzebny.
+- Oznacza to, że stare pliki muszą zostać poprawnie przypisane do wydarzeń w nowym modelu danych, aby galerie, liczniki i widoki eventowe działały spójnie także dla wcześniejszych uploadów.
+- Polskie znaki w PDF muszą zostać poprawione.
+- Brak polskich znaków nie jest już traktowany jako akceptowalne, świadomie odłożone ograniczenie.
+- Artifact Registry cleanup policy trzeba wdrożyć jako housekeeping po testach funkcji.
+
+## 5. Decyzje aktywne z wcześniejszych ustaleń
+
+- Firebase pozostaje aktualnym, działającym fundamentem produktu.
+- Multi-event pozostaje aktywnym kierunkiem produktu.
+- ZIP dla admina pozostaje w scope.
+- Usuwanie plików przez admina pozostaje w scope.
+- QR w aplikacji oraz plansze A4/A5 pozostają w scope.
+- Pasek dostępnego miejsca pozostaje funkcją informacyjną.
+- Auto-refresh galerii admina pozostaje aktywnym zachowaniem systemu.
+- Minimalny consent, limity plików, HEIC→JPEG, MOV bez konwersji i lightbox MVP-lite pozostają obowiązującymi decyzjami.
+
+## 6. Decyzje zastąpione lub rozszerzone
+
+- Wcześniejszy model single-event został zastąpiony przez multi-event.
+- Wcześniejsza decyzja o QR poza aplikacją została zastąpiona przez QR generowany w aplikacji.
+- Wcześniejsze odłożenie Google Drive do v2 zostało rozszerzone: teraz wchodzi jako eksperyment techniczny.
+- Wcześniejszy model jednego admina przez jeden allowlist e-mail został rozszerzony o test rejestracji i dostępu dla przynajmniej jednej dodatkowej osoby.
+- Wcześniejsze świadome odłożenie problemu polskich znaków w PDF zostało cofnięte: temat przechodzi do naprawy.
+- Wcześniejsze podejście bez licznika zdjęć i filmów zostaje rozszerzone: licznik wchodzi teraz do scope’u.
+
+## 7. Poza obecnym zakresem
+
+- Pełny multi-tenant.
+- Rozbudowany system ról i uprawnień.
+- Wiele niezależnych workspace’ów.
+- Płatności.
+- Pełna migracja architektury na Google Drive jako jedyny docelowy storage bez osobnej decyzji po eksperymencie.
